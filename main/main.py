@@ -33,11 +33,31 @@ from pathlib import Path
 # version: API版本号
 app = FastAPI(title="图片积木后端API", version="1.0.0")
 
-# 配置CORS（跨域资源共享）
-# 允许前端（运行在localhost:3000）访问后端API
+# ==================== CORS跨域配置 ====================
+# 配置CORS（跨域资源共享），允许前端访问后端API
+# 
+# 配置说明：
+# - 开发环境：允许 localhost:3000（本地开发）
+# - 生产环境：通过环境变量 ALLOWED_ORIGINS 配置允许的前端域名
+#   例如：ALLOWED_ORIGINS=https://your-frontend-domain.com,https://www.your-frontend-domain.com
+# 
+# 为什么需要 CORS？
+# - 浏览器的同源策略会阻止跨域请求
+# - 前端和后端可能部署在不同的域名/端口上
+# - CORS 允许后端明确指定哪些前端可以访问API
+import os
+# 从环境变量读取允许的来源，如果没有设置则默认允许 localhost:3000（开发环境）
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
+if allowed_origins_env:
+    # 生产环境：从环境变量读取允许的域名列表
+    allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+else:
+    # 开发环境：默认允许 localhost:3000
+    allowed_origins = ["http://localhost:3000"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # 允许的前端地址
+    allow_origins=allowed_origins,  # 允许的前端地址列表
     allow_credentials=True,  # 允许携带认证信息（如cookie、token）
     allow_methods=["*"],  # 允许所有HTTP方法（GET、POST、PUT、DELETE等）
     allow_headers=["*"],  # 允许所有请求头
