@@ -46,11 +46,27 @@ else:
 
 # 创建数据库引擎
 # echo=True: 打印所有SQL语句（用于调试，生产环境可以设为False）
+# pool_pre_ping=True: 在每次使用连接前检查连接是否有效，如果无效则重新连接
+#   这对于无服务器环境（如 Vercel）很重要，因为连接可能会被关闭
+# pool_recycle=300: 连接回收时间（秒），300秒后重新创建连接
+#   防止长时间连接导致的 SSL 连接关闭问题
 # connect_args: 数据库连接参数
-# - SQLite: 不需要额外参数
-# - PostgreSQL: 连接字符串中已包含 sslmode，不需要额外设置
-#   注意：SQLAlchemy/SQLModel 会自动解析连接字符串中的参数
-engine = create_engine(DATABASE_URL, echo=True)
+connect_args = {}
+if DATABASE_URL.startswith("postgresql://"):
+    # PostgreSQL 连接参数
+    # 确保 SSL 连接配置正确
+    connect_args = {
+        "sslmode": "require",
+        "connect_timeout": "10",  # 连接超时时间（秒）
+    }
+
+engine = create_engine(
+    DATABASE_URL,
+    echo=True,
+    pool_pre_ping=True,  # 使用前检查连接有效性
+    pool_recycle=300,    # 300秒后回收连接
+    connect_args=connect_args
+)
 
 
 # ==================== 数据库会话管理 ====================
