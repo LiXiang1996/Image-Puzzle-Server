@@ -68,10 +68,19 @@ app.add_middleware(
 init_db()
 
 # 配置静态文件服务（用于访问上传的图片）
-# 创建uploads目录（如果不存在）
-os.makedirs("uploads/avatars", exist_ok=True)
-# 挂载静态文件目录，使前端可以通过 /uploads/avatars/文件名 访问图片
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+# Vercel 环境处理：
+# - Vercel 是无服务器环境，文件系统是只读的，无法创建目录和写入文件
+# - 在 Vercel 环境下跳过静态文件目录的创建和挂载
+# - 文件上传功能需要使用云存储（如 AWS S3、Cloudinary 等）
+if not os.getenv("VERCEL"):
+    # 本地开发环境：创建uploads目录并挂载静态文件服务
+    os.makedirs("uploads/avatars", exist_ok=True)
+    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+    print("✅ 静态文件服务已启用（本地开发环境）")
+else:
+    # Vercel 环境：跳过静态文件目录创建
+    print("⚠️  检测到 Vercel 环境，跳过静态文件目录创建")
+    print("⚠️  文件上传功能需要使用云存储（如 AWS S3、Cloudinary 等）")
 
 
 # ==================== 请求/响应数据模型定义 ====================

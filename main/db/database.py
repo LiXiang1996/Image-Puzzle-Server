@@ -12,14 +12,44 @@ from sqlmodel import SQLModel, create_engine, Session
 import os
 
 # ==================== 数据库连接配置 ====================
+# 
+# 数据库类型选择：
+# 1. PostgreSQL（生产环境推荐）：使用 Vercel Postgres 或其他云数据库
+# 2. SQLite（本地开发）：使用文件数据库
+# 
+# 环境变量说明：
+# - POSTGRES_URL: PostgreSQL 连接字符串（Vercel Postgres 会自动提供）
+# - DATABASE_URL: 通用数据库连接字符串（如果设置了，优先使用）
+# - VERCEL: Vercel 环境标识（如果设置了，优先使用 PostgreSQL）
 
-# SQLite数据库文件路径
-# sqlite:/// 表示使用SQLite数据库
-# ./test.db 表示数据库文件在当前目录下，文件名为test.db
-DATABASE_URL = "sqlite:///./test.db"
+# 优先检查是否有 PostgreSQL 连接字符串
+postgres_url = os.getenv("POSTGRES_URL") or os.getenv("POSTGRES_PRISMA_URL") or os.getenv("DATABASE_URL")
+
+if postgres_url and ("postgres://" in postgres_url or "postgresql://" in postgres_url):
+    # 生产环境：使用 PostgreSQL（Vercel Postgres 或其他云数据库）
+    # 确保连接字符串格式正确（psycopg2 需要 postgresql:// 格式）
+    if postgres_url.startswith("postgres://"):
+        # Vercel Postgres 可能使用 postgres://，需要转换为 postgresql://
+        postgres_url = postgres_url.replace("postgres://", "postgresql://", 1)
+    DATABASE_URL = postgres_url
+    print("✅ 使用 PostgreSQL 数据库（生产环境）")
+elif os.getenv("VERCEL"):
+    # Vercel 环境但没有配置 PostgreSQL：使用内存数据库（临时方案）
+    DATABASE_URL = "sqlite:///:memory:"
+    print("⚠️  检测到 Vercel 环境，但未配置 PostgreSQL")
+    print("⚠️  使用内存数据库（数据不会持久化）")
+    print("⚠️  请在 Vercel 项目设置中添加 Vercel Postgres 数据库")
+else:
+    # 本地开发环境：使用 SQLite 文件数据库
+    DATABASE_URL = "sqlite:///./test.db"
+    print("✅ 使用 SQLite 数据库（本地开发环境）")
 
 # 创建数据库引擎
 # echo=True: 打印所有SQL语句（用于调试，生产环境可以设为False）
+# connect_args: 数据库连接参数
+# - SQLite: 不需要额外参数
+# - PostgreSQL: 连接字符串中已包含 sslmode，不需要额外设置
+#   注意：SQLAlchemy/SQLModel 会自动解析连接字符串中的参数
 engine = create_engine(DATABASE_URL, echo=True)
 
 
