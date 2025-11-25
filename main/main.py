@@ -402,8 +402,16 @@ async def upload_avatar(
     注意：
     - 只支持图片格式（jpg, jpeg, png, gif）
     - 文件大小限制为5MB
-    - 图片保存在uploads/avatars目录下
+    - 图片保存在uploads/avatars目录下（本地开发环境）
+    - Vercel 环境不支持文件上传，需要使用云存储（如 AWS S3、Cloudinary 等）
     """
+    # Vercel 环境检查：文件系统是只读的，无法写入文件
+    if os.getenv("VERCEL"):
+        raise HTTPException(
+            status_code=503,
+            detail="Vercel 环境不支持文件上传。请使用云存储服务（如 AWS S3、Cloudinary 等）"
+        )
+    
     try:
         # 检查文件类型
         allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/gif"]
