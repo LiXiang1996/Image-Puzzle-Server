@@ -25,6 +25,8 @@ import uvicorn
 import os
 import shutil
 from pathlib import Path
+import cloudinary
+import cloudinary.uploader
 
 # ==================== FastAPI应用初始化 ====================
 
@@ -66,6 +68,40 @@ app.add_middleware(
 # 初始化数据库
 # 在应用启动时创建数据库表结构
 init_db()
+
+# ==================== Cloudinary 云存储配置 ====================
+# Cloudinary 是一个云存储服务，用于在 Vercel 等无服务器环境中存储文件
+# 
+# 配置说明：
+# - 开发环境：如果没有配置 Cloudinary，则使用本地文件系统
+# - 生产环境：通过环境变量配置 Cloudinary 凭证
+# 
+# 环境变量：
+# - CLOUDINARY_CLOUD_NAME: Cloudinary 云名称
+# - CLOUDINARY_API_KEY: Cloudinary API 密钥
+# - CLOUDINARY_API_SECRET: Cloudinary API 密钥（保密）
+# 
+# 注册 Cloudinary：
+# 1. 访问 https://cloudinary.com/users/register/free
+# 2. 注册免费账号（25GB 存储，25GB 流量/月）
+# 3. 在 Dashboard 中获取 Cloud Name、API Key、API Secret
+# 4. 在 Vercel 项目设置中添加环境变量
+
+cloudinary_cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME")
+cloudinary_api_key = os.getenv("CLOUDINARY_API_KEY")
+cloudinary_api_secret = os.getenv("CLOUDINARY_API_SECRET")
+
+# 如果配置了 Cloudinary，则初始化
+if cloudinary_cloud_name and cloudinary_api_key and cloudinary_api_secret:
+    cloudinary.config(
+        cloud_name=cloudinary_cloud_name,
+        api_key=cloudinary_api_key,
+        api_secret=cloudinary_api_secret,
+        secure=True  # 使用 HTTPS
+    )
+    print("✅ Cloudinary 云存储已配置")
+else:
+    print("⚠️  未配置 Cloudinary，将使用本地文件系统（仅限本地开发环境）")
 
 # 配置静态文件服务（用于访问上传的图片）
 # Vercel 环境处理：
@@ -389,7 +425,7 @@ async def upload_avatar(
     上传用户头像接口
     
     功能说明：
-    上传用户头像图片，保存到服务器并返回图片URL
+    上传用户头像图片，保存到云存储或本地文件系统并返回图片URL
     
     参数：
     - file: 上传的图片文件
@@ -402,16 +438,9 @@ async def upload_avatar(
     注意：
     - 只支持图片格式（jpg, jpeg, png, gif）
     - 文件大小限制为5MB
-    - 图片保存在uploads/avatars目录下（本地开发环境）
-    - Vercel 环境不支持文件上传，需要使用云存储（如 AWS S3、Cloudinary 等）
+    - 优先使用 Cloudinary 云存储（生产环境）
+    - 如果没有配置 Cloudinary，则使用本地文件系统（仅限本地开发环境）
     """
-    # Vercel 环境检查：文件系统是只读的，无法写入文件
-    if os.getenv("VERCEL"):
-        raise HTTPException(
-            status_code=503,
-            detail="Vercel 环境不支持文件上传。请使用云存储服务（如 AWS S3、Cloudinary 等）"
-        )
-    
     try:
         # 检查文件类型
         allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/gif"]
@@ -423,21 +452,70 @@ async def upload_avatar(
         if len(file_content) > 5 * 1024 * 1024:  # 5MB
             raise HTTPException(status_code=400, detail="文件大小不能超过5MB")
         
-        # 创建上传目录
-        upload_dir = Path("uploads/avatars")
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        
         # 生成文件名（使用用户ID和时间戳）
         file_extension = file.filename.split(".")[-1] if "." in file.filename else "jpg"
-        filename = f"{current_user.id}_{int(datetime.now().timestamp())}.{file_extension}"
-        file_path = upload_dir / filename
+        filename = f"avatar_{current_user.id}_{int(datetime.now().timestamp())}.{file_extension}"
         
-        # 保存文件
-        with open(file_path, "wb") as buffer:
-            buffer.write(file_content)
+        # 检查是否配置了 Cloudinary（优先使用云存储）
+        cloudinary_cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME")
+        cloudinary_api_key = os.getenv("CLOUDINARY_API_KEY")
+        cloudinary_api_secret = os.getenv("CLOUDINARY_API_SECRET")
         
-        # 生成访问URL（相对路径，前端需要配置静态文件服务）
-        avatar_url = f"/uploads/avatars/{filename}"
+        if cloudinary_cloud_name and cloudinary_api_key and cloudinary_api_secret:
+            # ========== 使用 Cloudinary 云存储 ==========
+            try:
+                # 上传到 Cloudinary
+                # folder: 指定文件夹路径，便于管理
+                # public_id: 文件的唯一标识（不包含扩展名）
+                # resource_type: 资源类型，image 表示图片
+                upload_result = cloudinary.uploader.upload(
+                    file_content,
+                    folder="avatars",  # 存储在 avatars 文件夹下
+                    public_id=f"user_{current_user.id}_{int(datetime.now().timestamp())}",  # 唯一标识
+                    resource_type="image",
+                    overwrite=True,  # 如果文件已存在则覆盖
+                    transformation=[
+                        {"width": 400, "height": 400, "crop": "fill", "gravity": "face"}  # 自动裁剪为400x400，智能识别人脸
+                    ]
+                )
+                
+                # Cloudinary 返回的 URL 是完整的 HTTPS URL
+                avatar_url = upload_result.get("secure_url") or upload_result.get("url")
+                
+                print(f"✅ 头像已上传到 Cloudinary: {avatar_url}")
+                
+            except Exception as cloudinary_error:
+                print(f"❌ Cloudinary 上传失败: {type(cloudinary_error).__name__}: {str(cloudinary_error)}")
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"云存储上传失败: {str(cloudinary_error)}"
+                )
+        
+        elif os.getenv("VERCEL"):
+            # ========== Vercel 环境但没有配置 Cloudinary ==========
+            raise HTTPException(
+                status_code=503,
+                detail="Vercel 环境需要配置 Cloudinary 云存储。请在 Vercel 项目设置中添加 CLOUDINARY_CLOUD_NAME、CLOUDINARY_API_KEY、CLOUDINARY_API_SECRET 环境变量"
+            )
+        
+        else:
+            # ========== 本地开发环境：使用本地文件系统 ==========
+            # 创建上传目录
+            upload_dir = Path("uploads/avatars")
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            
+            file_path = upload_dir / filename
+            
+            # 保存文件
+            with open(file_path, "wb") as buffer:
+                buffer.write(file_content)
+            
+            # 生成访问URL（相对路径，前端需要配置静态文件服务）
+            avatar_url = f"/uploads/avatars/{filename}"
+            
+            print(f"✅ 头像已保存到本地: {avatar_url}")
         
         # 更新用户头像URL
         current_user.avatar = avatar_url
