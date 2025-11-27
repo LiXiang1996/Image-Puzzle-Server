@@ -49,15 +49,107 @@ app = FastAPI(title="家书后端API", version="1.0.0")
 # - 前端和后端可能部署在不同的域名/端口上
 # - CORS 允许后端明确指定哪些前端可以访问API
 import os
-# 从环境变量读取允许的来源，如果没有设置则默认允许 localhost:3000（开发环境）
+import re
+
+# ==================== 环境判断 ====================
+# Vercel 会自动设置 VERCEL_ENV 环境变量：
+# - production: 正式环境（main 分支）
+# - preview: 测试环境（其他分支或 PR）
+# - development: 开发环境（本地运行）
+vercel_env = os.getenv("VERCEL_ENV", "development")
+print(f"🌍 当前环境: {vercel_env}")
+
+# 从环境变量读取允许的来源
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
 if allowed_origins_env:
-    # 生产环境：从环境变量读取允许的域名列表
+    # 从环境变量读取允许的域名列表
     allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+    print(f"✅ CORS 配置：允许的来源 = {allowed_origins}")
 else:
-    # 开发环境：默认允许 localhost:3000
-    allowed_origins = ["http://localhost:3000"]
+    # 根据环境自动设置默认值
+    if vercel_env == "production":
+        # 正式环境：需要手动配置 ALLOWED_ORIGINS
+        allowed_origins = []
+        print("⚠️  正式环境：请设置 ALLOWED_ORIGINS 环境变量")
+    elif vercel_env == "preview":
+        # 测试环境：自动允许所有 Vercel 预览域名
+        allowed_origins = []
+        print("✅ 测试环境：将自动允许所有 Vercel 预览域名")
+    else:
+        # 开发环境：默认允许 localhost:3000
+        allowed_origins = ["http://localhost:3000"]
+        print(f"✅ 开发环境：默认允许 localhost:3000")
 
+# 自定义 CORS 中间件，支持通配符匹配
+def cors_middleware(app):
+    @app.middleware("http")
+    async def add_cors_headers(request, call_next):
+        origin = request.headers.get("origin")
+        if origin:
+            # 检查是否匹配允许的来源
+            is_allowed = False
+            for allowed_origin in allowed_origins:
+                if allowed_origin == origin:
+                    is_allowed = True
+                    break
+                # 支持通配符匹配：*.vercel.app
+                elif "*" in allowed_origin:
+                    pattern = allowed_origin.replace(".", r"\.").replace("*", r".*")
+                    if re.match(pattern, origin):
+                        is_allowed = True
+                        break
+            
+            # 自动允许所有 Vercel 域名（包括预览和正式环境）
+            if not is_allowed and origin.endswith(".vercel.app"):
+                is_allowed = True
+                print(f"✅ 自动允许 Vercel 域名: {origin} (环境: {vercel_env})")
+            
+            if is_allowed:
+                response = await call_next(request)
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+                response.headers["Access-Control-Allow-Methods"] = "*"
+                response.headers["Access-Control-Allow-Headers"] = "*"
+                return response
+        
+        # 处理 OPTIONS 预检请求
+        if request.method == "OPTIONS":
+            from fastapi.responses import Response
+            # 检查是否允许该来源
+            is_allowed = False
+            if origin:
+                for allowed_origin in allowed_origins:
+                    if allowed_origin == origin:
+                        is_allowed = True
+                        break
+                    elif "*" in allowed_origin:
+                        pattern = allowed_origin.replace(".", r"\.").replace("*", r".*")
+                        if re.match(pattern, origin):
+                            is_allowed = True
+                            break
+                # 测试环境或正式环境：自动允许所有 Vercel 域名
+                if not is_allowed and origin.endswith(".vercel.app"):
+                    is_allowed = True
+                    print(f"✅ [OPTIONS] 自动允许 Vercel 域名: {origin}")
+            
+            return Response(
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin": origin if (origin and is_allowed) else "*",
+                    "Access-Control-Allow-Credentials": "true",
+                    "Access-Control-Allow-Methods": "*",
+                    "Access-Control-Allow-Headers": "*",
+                }
+            )
+        
+        # 如果没有匹配的来源，也允许通过（让 FastAPI 的 CORS 中间件处理）
+        return await call_next(request)
+    return add_cors_headers
+
+# 使用自定义 CORS 中间件
+cors_middleware(app)
+
+# 同时保留 FastAPI 的 CORS 中间件作为备用
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,  # 允许的前端地址列表
@@ -262,38 +354,52 @@ def login(data: LoginRequest, session: Session = Depends(get_session)):
     - 成功：返回token和用户信息
     - 失败：返回401错误（用户名或密码错误）
     """
-    # 查询用户：用户名和密码都匹配
-    user = session.exec(
-        select(User).where(
-            User.username == data.username,
-            User.password == data.password
-        )
-    ).first()
-    
-    # 如果用户不存在或密码错误
-    if not user:
-        raise HTTPException(status_code=400, detail="用户名或密码错误")
-    
-    # 生成JWT token
-    # data={"sub": str(user.id)}: token中存储用户ID（必须是字符串）
-    # sub是JWT标准字段，表示subject（主题/用户ID）
-    # 注意：JWT标准要求sub字段必须是字符串类型
-    access_token = create_access_token(data={"sub": str(user.id)})
-    
-    # 返回登录成功响应
-    return LoginResponse(
-        code=200,
-        message="登录成功",
-        data={
-            "token": access_token,  # JWT token，前端需要保存这个token
-            "userInfo": {
-                "id": str(user.id),
-                "username": user.username,
-                "email": user.email or "",  # 如果email为None，返回空字符串
-                "avatar": user.avatar
+    try:
+        print(f"🔐 登录请求：用户名 = {data.username}")
+        # 查询用户：用户名和密码都匹配
+        user = session.exec(
+            select(User).where(
+                User.username == data.username,
+                User.password == data.password
+            )
+        ).first()
+        
+        # 如果用户不存在或密码错误
+        if not user:
+            print(f"❌ 登录失败：用户名或密码错误（用户名 = {data.username}）")
+            raise HTTPException(status_code=401, detail="用户名或密码错误")
+        
+        print(f"✅ 登录成功：用户ID = {user.id}, 用户名 = {user.username}")
+        
+        # 生成JWT token
+        # data={"sub": str(user.id)}: token中存储用户ID（必须是字符串）
+        # sub是JWT标准字段，表示subject（主题/用户ID）
+        # 注意：JWT标准要求sub字段必须是字符串类型
+        access_token = create_access_token(data={"sub": str(user.id)})
+        
+        # 返回登录成功响应
+        return LoginResponse(
+            code=200,
+            message="登录成功",
+            data={
+                "token": access_token,  # JWT token，前端需要保存这个token
+                "userInfo": {
+                    "id": str(user.id),
+                    "username": user.username,
+                    "email": user.email or "",  # 如果email为None，返回空字符串
+                    "avatar": user.avatar
+                }
             }
-        }
-    )
+        )
+    except HTTPException:
+        # HTTP异常直接重新抛出
+        raise
+    except Exception as e:
+        # 其他异常记录日志并返回500错误
+        print(f"❌ 登录错误: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()  # 打印完整的错误堆栈
+        raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
 
 
 @app.get("/api/auth/user", response_model=dict)

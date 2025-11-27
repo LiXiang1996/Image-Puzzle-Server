@@ -11,6 +11,10 @@
 from sqlmodel import SQLModel, create_engine, Session
 import os
 
+# ==================== 环境判断 ====================
+vercel_env = os.getenv("VERCEL_ENV", "development")
+print(f"🌍 数据库环境: {vercel_env}")
+
 # ==================== 数据库连接配置 ====================
 # 
 # 数据库类型选择：
@@ -26,13 +30,18 @@ import os
 postgres_url = os.getenv("POSTGRES_URL") or os.getenv("POSTGRES_PRISMA_URL") or os.getenv("DATABASE_URL")
 
 if postgres_url and ("postgres://" in postgres_url or "postgresql://" in postgres_url):
-    # 生产环境：使用 PostgreSQL（Vercel Postgres 或其他云数据库）
+    # 使用 PostgreSQL（Vercel Postgres 或其他云数据库）
     # 确保连接字符串格式正确（psycopg2 需要 postgresql:// 格式）
     if postgres_url.startswith("postgres://"):
         # Vercel Postgres 可能使用 postgres://，需要转换为 postgresql://
         postgres_url = postgres_url.replace("postgres://", "postgresql://", 1)
     DATABASE_URL = postgres_url
-    print("✅ 使用 PostgreSQL 数据库（生产环境）")
+    if vercel_env == "production":
+        print("✅ 使用 PostgreSQL 数据库（正式环境）")
+    elif vercel_env == "preview":
+        print("✅ 使用 PostgreSQL 数据库（测试环境）")
+    else:
+        print("✅ 使用 PostgreSQL 数据库")
 elif os.getenv("VERCEL"):
     # Vercel 环境但没有配置 PostgreSQL：使用内存数据库（临时方案）
     DATABASE_URL = "sqlite:///:memory:"
