@@ -126,7 +126,7 @@ def init_db():
     # 导入所有模型类
     # 这一步很重要：确保所有模型类被注册到SQLModel.metadata中
     # 如果不导入，SQLModel不知道要创建哪些表
-    from db.models import User, Work, ConsumptionRecord
+    from db.models import User, Note
     
     # 创建所有表
     # SQLModel.metadata.create_all(engine) 会：
