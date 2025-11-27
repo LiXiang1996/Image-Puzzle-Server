@@ -84,6 +84,11 @@ else:
 @app.middleware("http")
 async def add_cors_headers(request, call_next):
     origin = request.headers.get("origin")
+    method = request.method
+    path = request.url.path
+    
+    # 记录所有请求（包括 OPTIONS）
+    print(f"🌐 收到请求: {method} {path}, Origin: {origin}, 环境: {vercel_env}")
     
     # 检查是否允许该来源
     is_allowed = False
@@ -92,12 +97,14 @@ async def add_cors_headers(request, call_next):
         for allowed_origin in allowed_origins:
             if allowed_origin == origin:
                 is_allowed = True
+                print(f"✅ 来源匹配允许列表: {origin}")
                 break
             # 支持通配符匹配：*.vercel.app
             elif "*" in allowed_origin:
                 pattern = allowed_origin.replace(".", r"\.").replace("*", r".*")
                 if re.match(pattern, origin):
                     is_allowed = True
+                    print(f"✅ 来源匹配通配符: {allowed_origin} -> {origin}")
                     break
         
         # 自动允许所有 Vercel 域名（包括预览和正式环境）
@@ -115,6 +122,7 @@ async def add_cors_headers(request, call_next):
         
         # 返回 CORS 预检响应（必须返回具体的 origin，不能是 "*"）
         cors_origin = origin if origin else "*"
+        print(f"📤 [OPTIONS] 返回 CORS 响应: Origin={cors_origin}, Path={path}")
         return Response(
             status_code=200,
             headers={
@@ -126,6 +134,7 @@ async def add_cors_headers(request, call_next):
         )
     
     # 处理实际请求
+    print(f"➡️  处理实际请求: {method} {path}, Origin: {origin}, Allowed: {is_allowed}")
     response = await call_next(request)
     
     # 如果允许该来源，添加 CORS 头
@@ -133,12 +142,16 @@ async def add_cors_headers(request, call_next):
         # 再次检查（确保 Vercel 域名被允许）
         if not is_allowed and origin.endswith(".vercel.app"):
             is_allowed = True
+            print(f"✅ 实际请求时自动允许 Vercel 域名: {origin}")
         
         if is_allowed:
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Access-Control-Allow-Credentials"] = "true"
             response.headers["Access-Control-Allow-Methods"] = "*"
             response.headers["Access-Control-Allow-Headers"] = "*"
+            print(f"✅ 已添加 CORS 头: Origin={origin}")
+        else:
+            print(f"⚠️  来源未允许，未添加 CORS 头: {origin}")
     
     return response
 
@@ -387,7 +400,7 @@ def login(data: LoginRequest, session: Session = Depends(get_session)):
             }
         )
     except HTTPException:
-        # HTTP异常直接重新抛出
+        # HTTP异常直接重新抛出（如用户名或密码错误）
         raise
     except Exception as e:
         # 其他异常记录日志并返回500错误
