@@ -81,78 +81,73 @@ else:
         print(f"✅ 开发环境：默认允许 localhost:3000")
 
 # 自定义 CORS 中间件，支持通配符匹配
-def cors_middleware(app):
-    @app.middleware("http")
-    async def add_cors_headers(request, call_next):
-        origin = request.headers.get("origin")
-        if origin:
-            # 检查是否匹配允许的来源
-            is_allowed = False
-            for allowed_origin in allowed_origins:
-                if allowed_origin == origin:
+@app.middleware("http")
+async def add_cors_headers(request, call_next):
+    origin = request.headers.get("origin")
+    
+    # 检查是否允许该来源
+    is_allowed = False
+    if origin:
+        # 检查是否在允许列表中
+        for allowed_origin in allowed_origins:
+            if allowed_origin == origin:
+                is_allowed = True
+                break
+            # 支持通配符匹配：*.vercel.app
+            elif "*" in allowed_origin:
+                pattern = allowed_origin.replace(".", r"\.").replace("*", r".*")
+                if re.match(pattern, origin):
                     is_allowed = True
                     break
-                # 支持通配符匹配：*.vercel.app
-                elif "*" in allowed_origin:
-                    pattern = allowed_origin.replace(".", r"\.").replace("*", r".*")
-                    if re.match(pattern, origin):
-                        is_allowed = True
-                        break
-            
-            # 自动允许所有 Vercel 域名（包括预览和正式环境）
-            if not is_allowed and origin.endswith(".vercel.app"):
-                is_allowed = True
-                print(f"✅ 自动允许 Vercel 域名: {origin} (环境: {vercel_env})")
-            
-            if is_allowed:
-                response = await call_next(request)
-                response.headers["Access-Control-Allow-Origin"] = origin
-                response.headers["Access-Control-Allow-Credentials"] = "true"
-                response.headers["Access-Control-Allow-Methods"] = "*"
-                response.headers["Access-Control-Allow-Headers"] = "*"
-                return response
         
-        # 处理 OPTIONS 预检请求
-        if request.method == "OPTIONS":
-            from fastapi.responses import Response
-            # 检查是否允许该来源
-            is_allowed = False
-            if origin:
-                for allowed_origin in allowed_origins:
-                    if allowed_origin == origin:
-                        is_allowed = True
-                        break
-                    elif "*" in allowed_origin:
-                        pattern = allowed_origin.replace(".", r"\.").replace("*", r".*")
-                        if re.match(pattern, origin):
-                            is_allowed = True
-                            break
-                # 测试环境或正式环境：自动允许所有 Vercel 域名
-                if not is_allowed and origin.endswith(".vercel.app"):
-                    is_allowed = True
-                    print(f"✅ [OPTIONS] 自动允许 Vercel 域名: {origin}")
-            
-            return Response(
-                status_code=200,
-                headers={
-                    "Access-Control-Allow-Origin": origin if (origin and is_allowed) else "*",
-                    "Access-Control-Allow-Credentials": "true",
-                    "Access-Control-Allow-Methods": "*",
-                    "Access-Control-Allow-Headers": "*",
-                }
-            )
+        # 自动允许所有 Vercel 域名（包括预览和正式环境）
+        if not is_allowed and origin.endswith(".vercel.app"):
+            is_allowed = True
+            print(f"✅ 自动允许 Vercel 域名: {origin} (环境: {vercel_env})")
+    
+    # 处理 OPTIONS 预检请求
+    if request.method == "OPTIONS":
+        from fastapi.responses import Response
+        # 对于 OPTIONS 请求，如果来源是 Vercel 域名，总是允许
+        if origin and origin.endswith(".vercel.app"):
+            is_allowed = True
+            print(f"✅ [OPTIONS] 自动允许 Vercel 域名: {origin}")
         
-        # 如果没有匹配的来源，也允许通过（让 FastAPI 的 CORS 中间件处理）
-        return await call_next(request)
-    return add_cors_headers
+        # 返回 CORS 预检响应（必须返回具体的 origin，不能是 "*"）
+        cors_origin = origin if origin else "*"
+        return Response(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin": cors_origin,
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Allow-Methods": "*",
+                "Access-Control-Allow-Headers": "*",
+            }
+        )
+    
+    # 处理实际请求
+    response = await call_next(request)
+    
+    # 如果允许该来源，添加 CORS 头
+    if origin:
+        # 再次检查（确保 Vercel 域名被允许）
+        if not is_allowed and origin.endswith(".vercel.app"):
+            is_allowed = True
+        
+        if is_allowed:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = "*"
+            response.headers["Access-Control-Allow-Headers"] = "*"
+    
+    return response
 
-# 使用自定义 CORS 中间件
-cors_middleware(app)
-
-# 同时保留 FastAPI 的 CORS 中间件作为备用
+# 使用 FastAPI 的 CORS 中间件
+# 注意：自定义中间件已经处理了 CORS，这里作为备用
+# 如果 allowed_origins 为空，FastAPI 中间件可能不会正确处理，所以主要依赖自定义中间件
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,  # 允许的前端地址列表
+    allow_origins=allowed_origins if allowed_origins else ["*"],  # 如果为空，允许所有来源（由自定义中间件控制）
     allow_credentials=True,  # 允许携带认证信息（如cookie、token）
     allow_methods=["*"],  # 允许所有HTTP方法（GET、POST、PUT、DELETE等）
     allow_headers=["*"],  # 允许所有请求头
