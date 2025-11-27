@@ -50,102 +50,30 @@ class User(SQLModel, table=True):
     updated_at: Optional[datetime] = Field(default_factory=datetime.now)
 
 
-class Work(SQLModel, table=True):
+class Note(SQLModel, table=True):
     """
-    作品模型（对应数据库中的work表）
+    笔记模型（对应数据库中的note表）
     
     字段说明：
-    - id: 作品ID，主键
+    - id: 笔记ID，主键
     - user_id: 用户ID，外键关联到user表
-    - title: 作品标题
-    - description: 作品描述（可选）
-    - image_url: 作品图片URL
-    - prompt: AI生成提示词
-    - negative_prompt: 负面提示词（可选）
-    - model: 使用的AI模型（可选）
-    - parameters: 其他参数，以JSON字符串形式存储
-    - status: 作品状态（pending待处理, processing处理中, completed已完成, failed失败）
+    - title: 笔记标题（必填），建立索引支持搜索
+    - content: 笔记内容，Markdown格式存储
+    - status: 笔记状态（private私密, public公开, draft草稿）
+    - published_at: 发布时间（公开时设置），用于"发现广场"排序
     - created_at: 创建时间
-    - updated_at: 更新时间
+    - updated_at: 最后编辑时间
     
-    注意：
-    - parameters字段存储为JSON字符串，需要使用get_parameters()和set_parameters()方法转换
-    """
-    id: Optional[int] = Field(default=None, primary_key=True)
-    user_id: int = Field(foreign_key="user.id", index=True)  # 外键，关联到user表的id字段
-    title: str  # 作品标题
-    description: Optional[str] = None  # 作品描述
-    image_url: str  # 图片URL
-    prompt: str  # AI生成提示词
-    negative_prompt: Optional[str] = None  # 负面提示词
-    model: Optional[str] = None  # AI模型名称
-    # 参数字段：存储为JSON字符串
-    # 因为SQLite不支持JSON类型，所以用字符串存储
-    parameters: Optional[str] = None
-    # 作品状态：pending(待处理), processing(处理中), completed(已完成), failed(失败)
-    status: str = Field(default="pending")
-    created_at: Optional[datetime] = Field(default_factory=datetime.now)
-    updated_at: Optional[datetime] = Field(default_factory=datetime.now)
-
-    def get_parameters(self) -> Optional[Dict[str, Any]]:
-        """
-        获取参数字典
-        
-        功能说明：
-        将存储的JSON字符串转换为Python字典
-        
-        返回：
-        - 参数字典，如果parameters为None则返回None
-        
-        示例：
-        work.parameters = '{"width": 512, "height": 512}'
-        params = work.get_parameters()  # 返回 {"width": 512, "height": 512}
-        """
-        if self.parameters:
-            # json.loads(): 将JSON字符串解析为Python字典
-            return json.loads(self.parameters)
-        return None
-
-    def set_parameters(self, params: Optional[Dict[str, Any]]):
-        """
-        设置参数字典
-        
-        功能说明：
-        将Python字典转换为JSON字符串存储
-        
-        参数：
-        - params: 参数字典，如果为None则设置为None
-        
-        示例：
-        work.set_parameters({"width": 512, "height": 512})
-        # work.parameters 现在是 '{"width": 512, "height": 512}'
-        """
-        if params:
-            # json.dumps(): 将Python字典转换为JSON字符串
-            self.parameters = json.dumps(params)
-        else:
-            self.parameters = None
-
-
-class ConsumptionRecord(SQLModel, table=True):
-    """
-    消费记录模型（对应数据库中的consumptionrecord表）
-    
-    字段说明：
-    - id: 记录ID，主键
-    - user_id: 用户ID，外键关联到user表
-    - type: 消费类型（image_generation图片生成, premium_feature高级功能, subscription订阅）
-    - amount: 消费金额
-    - description: 消费描述
-    - status: 消费状态（success成功, failed失败, refunded已退款）
-    - created_at: 创建时间（消费时间）
+    状态说明：
+    - private: 私密笔记（默认）
+    - public: 公开笔记（已发布，会出现在"发现广场"）
+    - draft: 草稿（私密的子状态，仅用于用户自我管理）
     """
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)  # 外键，关联到user表
-    # 消费类型：image_generation(图片生成), premium_feature(高级功能), subscription(订阅)
-    type: str
-    amount: float  # 消费金额（浮点数）
-    description: str  # 消费描述
-    # 消费状态：success(成功), failed(失败), refunded(已退款)
-    status: str = Field(default="success")
+    title: str = Field(index=True)  # 标题，建立索引支持搜索
+    content: str  # 内容，Markdown格式存储
+    status: str = Field(default="private")  # 状态：private/public/draft
+    published_at: Optional[datetime] = None  # 发布时间（公开时设置）
     created_at: Optional[datetime] = Field(default_factory=datetime.now)
+    updated_at: Optional[datetime] = Field(default_factory=datetime.now)

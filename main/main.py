@@ -19,11 +19,12 @@ from typing import List, Optional
 from datetime import datetime
 from pydantic import BaseModel
 from db.database import init_db, get_session
-from db.models import User, Work, ConsumptionRecord
+from db.models import User, Note
 from auth import create_access_token, get_current_user
 import uvicorn
 import os
 import shutil
+import re
 from pathlib import Path
 import cloudinary
 import cloudinary.uploader
@@ -33,7 +34,7 @@ import cloudinary.uploader
 # 创建FastAPI应用实例
 # title: API文档中显示的标题
 # version: API版本号
-app = FastAPI(title="图片积木后端API", version="1.0.0")
+app = FastAPI(title="家书后端API", version="1.0.0")
 
 # ==================== CORS跨域配置 ====================
 # 配置CORS（跨域资源共享），允许前端访问后端API
@@ -151,36 +152,23 @@ class UserInfoResponse(BaseModel):
     avatar: Optional[str] = None
 
 
-class WorkCreate(BaseModel):
-    """创建作品请求模型"""
-    title: str  # 作品标题
-    description: Optional[str] = None  # 作品描述（可选）
-    image_url: str  # 图片URL
-    prompt: str  # AI生成提示词
-    negative_prompt: Optional[str] = None  # 负面提示词（可选）
-    model: Optional[str] = None  # 使用的AI模型（可选）
-    parameters: Optional[dict] = None  # 其他参数（可选）
+class NoteCreate(BaseModel):
+    """创建笔记请求模型"""
+    title: str  # 笔记标题（必填）
+    content: str  # 笔记内容（Markdown格式）
+    status: Optional[str] = "private"  # 状态：private/public/draft，默认private
 
 
-class WorkUpdate(BaseModel):
-    """更新作品请求模型"""
-    # 所有字段都是可选的，只更新提供的字段
+class NoteUpdate(BaseModel):
+    """更新笔记请求模型"""
     title: Optional[str] = None
-    description: Optional[str] = None
-    image_url: Optional[str] = None
-    prompt: Optional[str] = None
-    negative_prompt: Optional[str] = None
-    model: Optional[str] = None
-    parameters: Optional[dict] = None
-    status: Optional[str] = None  # 作品状态：pending, processing, completed, failed
+    content: Optional[str] = None
+    status: Optional[str] = None  # 状态：private/public/draft
 
 
-class ConsumptionHistoryParams(BaseModel):
-    """消费历史查询参数模型"""
-    page: Optional[int] = 1  # 页码，默认第1页
-    page_size: Optional[int] = 10  # 每页记录数，默认10条
-    start_date: Optional[str] = None  # 开始日期（可选）
-    end_date: Optional[str] = None  # 结束日期（可选）
+class NoteAutoSave(BaseModel):
+    """自动保存请求模型"""
+    content: str  # 笔记内容（只更新内容，不改变状态）
 
 
 class UserUpdateRequest(BaseModel):
@@ -339,6 +327,48 @@ def get_user_info(current_user: User = Depends(get_current_user)):
             # 将datetime对象转换为ISO格式字符串
             "createdAt": current_user.created_at.isoformat() if current_user.created_at else "",
             "updatedAt": current_user.updated_at.isoformat() if current_user.updated_at else ""
+        }
+    }
+
+
+@app.get("/api/users/{user_id}", response_model=dict)
+def get_user_public_info(
+    user_id: int,
+    session: Session = Depends(get_session)
+):
+    """
+    获取用户公开信息接口
+    
+    功能说明：
+    获取用户的公开信息（昵称、头像、简介等），用于用户公开主页
+    
+    参数：
+    - user_id: 用户ID
+    - session: 数据库会话
+    
+    返回：
+    - 用户公开信息
+    """
+    user = session.get(User, user_id)
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    
+    # 统计用户的公开文章数
+    public_notes_count = len(session.exec(
+        select(Note).where(Note.user_id == user_id).where(Note.status == "public")
+    ).all())
+    
+    return {
+        "code": 200,
+        "message": "success",
+        "data": {
+            "id": str(user.id),
+            "username": user.username,
+            "nickname": user.nickname,
+            "avatar": user.avatar,
+            "bio": user.bio,
+            "public_notes_count": public_notes_count,
         }
     }
 
@@ -564,301 +594,290 @@ def logout():
     }
 
 
-# ==================== 作品相关接口 ====================
+# ==================== 笔记相关接口 ====================
 
-@app.get("/api/works", response_model=dict)
-def get_works(
+@app.get("/api/notes", response_model=dict)
+def get_notes(
     page: int = 1,
-    page_size: int = 10,
+    page_size: int = 20,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
     """
-    获取作品列表接口
+    获取我的笔记列表接口
     
     功能说明：
-    1. 获取当前登录用户的所有作品
+    1. 获取当前登录用户的所有笔记
     2. 支持分页查询
-    3. 只返回当前用户的作品（不能查看其他用户的作品）
+    3. 支持按标题搜索
+    4. 支持按状态筛选（private/public/draft）
     
     参数：
     - page: 页码，从1开始
     - page_size: 每页记录数
+    - search: 搜索关键词（标题模糊搜索）
+    - status: 状态筛选（private/public/draft）
     - current_user: 当前登录用户（自动注入）
     - session: 数据库会话（自动注入）
     
     返回：
-    - 作品列表（数组）
-    
-    注意：
-    - 需要登录认证（需要token）
-    - 只返回当前用户的作品
+    - 笔记列表和分页信息
     """
-    # 计算偏移量：跳过前面的记录
-    # 例如：第2页，每页10条，offset = (2-1) * 10 = 10（跳过前10条）
     offset = (page - 1) * page_size
     
-    # 构建查询语句：查询当前用户的所有作品
-    statement = select(Work).where(Work.user_id == current_user.id)
-    # 用于统计总数的查询（不分页）
-    total_statement = select(Work).where(Work.user_id == current_user.id)
+    # 构建查询语句：查询当前用户的所有笔记
+    statement = select(Note).where(Note.user_id == current_user.id)
+    total_statement = select(Note).where(Note.user_id == current_user.id)
+    
+    # 状态筛选
+    if status and status in ["private", "public", "draft"]:
+        statement = statement.where(Note.status == status)
+        total_statement = total_statement.where(Note.status == status)
+    
+    # 标题搜索（模糊匹配）
+    if search and search.strip():
+        search_term = f"%{search.strip()}%"
+        statement = statement.where(Note.title.like(search_term))
+        total_statement = total_statement.where(Note.title.like(search_term))
     
     # 执行分页查询
-    # .offset(offset): 跳过前面的记录
-    # .limit(page_size): 限制返回的记录数
-    # .all(): 获取所有结果
-    works = session.exec(statement.offset(offset).limit(page_size)).all()
-    # 统计总数（用于前端分页显示）
-    total = len(session.exec(total_statement).all())
+    notes = session.exec(statement.order_by(Note.updated_at.desc()).offset(offset).limit(page_size)).all()
+    # 统计总数
+    total_notes = session.exec(total_statement).all()
+    total = len(total_notes)
     
-    # 将数据库对象转换为字典格式（便于JSON序列化）
-    works_list = []
-    for work in works:
-        works_list.append({
-            "id": str(work.id),
-            "title": work.title,
-            "description": work.description,
-            "imageUrl": work.image_url,  # 注意：前端使用驼峰命名，后端使用下划线
-            "prompt": work.prompt,
-            "negativePrompt": work.negative_prompt,
-            "model": work.model,
-            "parameters": work.get_parameters(),  # 调用模型方法将JSON字符串转换为字典
-            "status": work.status,
-            "createdAt": work.created_at.isoformat() if work.created_at else "",
-            "updatedAt": work.updated_at.isoformat() if work.updated_at else ""
+    # 转换为字典格式
+    notes_list = []
+    for note in notes:
+        # 提取内容预览（前50字符，去除HTML标签）
+        content_preview = note.content[:50] if note.content else ""
+        # 简单去除HTML标签
+        content_preview = re.sub(r'<[^>]+>', '', content_preview)
+        
+        notes_list.append({
+            "id": str(note.id),
+            "title": note.title,
+            "content_preview": content_preview,
+            "status": note.status,
+            "updated_at": note.updated_at.isoformat() if note.updated_at else "",
+            "created_at": note.created_at.isoformat() if note.created_at else "",
         })
     
     return {
         "code": 200,
         "message": "success",
-        "data": works_list
+        "data": {
+            "list": notes_list,
+            "total": total,
+            "page": page,
+            "page_size": page_size
+        }
     }
 
 
-@app.get("/api/works/{work_id}", response_model=dict)
-def get_work_by_id(
-    work_id: int,
+@app.get("/api/notes/{note_id}", response_model=dict)
+def get_note_by_id(
+    note_id: int,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
     """
-    获取单个作品详情接口
+    获取笔记详情接口
     
     功能说明：
-    根据作品ID获取作品详情，但只能获取当前用户自己的作品
+    根据笔记ID获取笔记详情，只能获取当前用户自己的笔记
     
     参数：
-    - work_id: 作品ID（路径参数）
+    - note_id: 笔记ID（路径参数）
     - current_user: 当前登录用户
     - session: 数据库会话
     
     返回：
-    - 作品详情
+    - 笔记详情
     
     注意：
-    - 如果作品不存在或不属于当前用户，返回404错误
+    - 如果笔记不存在或不属于当前用户，返回404错误
     """
-    # 根据ID查询作品
-    work = session.get(Work, work_id)
+    note = session.get(Note, note_id)
     
-    # 检查作品是否存在且属于当前用户
-    if not work or work.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="作品不存在")
+    # 检查笔记是否存在且属于当前用户
+    if not note or note.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="笔记不存在")
     
-    # 返回作品详情
     return {
         "code": 200,
         "message": "success",
         "data": {
-            "id": str(work.id),
-            "title": work.title,
-            "description": work.description,
-            "imageUrl": work.image_url,
-            "prompt": work.prompt,
-            "negativePrompt": work.negative_prompt,
-            "model": work.model,
-            "parameters": work.get_parameters(),
-            "status": work.status,
-            "createdAt": work.created_at.isoformat() if work.created_at else "",
-            "updatedAt": work.updated_at.isoformat() if work.updated_at else ""
+            "id": str(note.id),
+            "user_id": str(note.user_id),
+            "title": note.title,
+            "content": note.content,
+            "status": note.status,
+            "published_at": note.published_at.isoformat() if note.published_at else None,
+            "created_at": note.created_at.isoformat() if note.created_at else "",
+            "updated_at": note.updated_at.isoformat() if note.updated_at else ""
         }
     }
 
 
-@app.post("/api/works", response_model=dict)
-def create_work(
-    data: WorkCreate,
+@app.post("/api/notes", response_model=dict)
+def create_note(
+    data: NoteCreate,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
     """
-    创建新作品接口
+    创建新笔记接口
     
     功能说明：
-    为当前登录用户创建一个新作品
+    为当前登录用户创建一个新笔记
     
     参数：
-    - data: 作品数据
+    - data: 笔记数据
     - current_user: 当前登录用户
     - session: 数据库会话
     
     返回：
-    - 创建的作品信息
+    - 创建的笔记信息
     
     注意：
-    - 新作品默认状态为"pending"（待处理）
+    - 新笔记默认状态为"private"（私密）
+    - 如果状态为"public"，会自动设置published_at
     """
-    # 创建作品对象
-    new_work = Work(
-        user_id=current_user.id,  # 关联到当前用户
+    # 创建笔记对象
+    new_note = Note(
+        user_id=current_user.id,
         title=data.title,
-        description=data.description,
-        image_url=data.image_url,
-        prompt=data.prompt,
-        negative_prompt=data.negative_prompt,
-        model=data.model,
-        status="pending"  # 默认状态：待处理
+        content=data.content,
+        status=data.status or "private"
     )
-    # 设置参数字典（会转换为JSON字符串存储）
-    new_work.set_parameters(data.parameters)
+    
+    # 如果状态为公开，设置发布时间
+    if new_note.status == "public":
+        new_note.published_at = datetime.now()
     
     # 保存到数据库
-    session.add(new_work)
+    session.add(new_note)
     session.commit()
-    session.refresh(new_work)
+    session.refresh(new_note)
     
-    # 返回创建的作品
     return {
         "code": 200,
         "message": "创建成功",
         "data": {
-            "id": str(new_work.id),
-            "title": new_work.title,
-            "description": new_work.description,
-            "imageUrl": new_work.image_url,
-            "prompt": new_work.prompt,
-            "negativePrompt": new_work.negative_prompt,
-            "model": new_work.model,
-            "parameters": new_work.get_parameters(),
-            "status": new_work.status,
-            "createdAt": new_work.created_at.isoformat() if new_work.created_at else "",
-            "updatedAt": new_work.updated_at.isoformat() if new_work.updated_at else ""
+            "id": str(new_note.id),
+            "user_id": str(new_note.user_id),
+            "title": new_note.title,
+            "content": new_note.content,
+            "status": new_note.status,
+            "published_at": new_note.published_at.isoformat() if new_note.published_at else None,
+            "created_at": new_note.created_at.isoformat() if new_note.created_at else "",
+            "updated_at": new_note.updated_at.isoformat() if new_note.updated_at else ""
         }
     }
 
 
-@app.put("/api/works/{work_id}", response_model=dict)
-def update_work(
-    work_id: int,
-    data: WorkUpdate,
+@app.put("/api/notes/{note_id}", response_model=dict)
+def update_note(
+    note_id: int,
+    data: NoteUpdate,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
     """
-    更新作品接口
+    更新笔记接口
     
     功能说明：
-    更新作品信息，只能更新当前用户自己的作品
+    更新笔记信息，只能更新当前用户自己的笔记
     
     参数：
-    - work_id: 作品ID（路径参数）
+    - note_id: 笔记ID（路径参数）
     - data: 要更新的数据（所有字段都是可选的）
     - current_user: 当前登录用户
     - session: 数据库会话
     
     返回：
-    - 更新后的作品信息
+    - 更新后的笔记信息
     
     注意：
     - 只更新提供的字段，未提供的字段保持不变
     - 更新时会自动更新updated_at时间戳
+    - 如果状态改为public，会自动设置published_at
     """
-    # 查询作品
-    work = session.get(Work, work_id)
+    note = session.get(Note, note_id)
     
-    # 检查作品是否存在且属于当前用户
-    if not work or work.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="作品不存在")
+    # 检查笔记是否存在且属于当前用户
+    if not note or note.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="笔记不存在")
     
-    # 更新字段（只更新提供的字段）
-    # 使用 is not None 判断，因为有些字段可能为None（需要设置为None）
+    # 更新字段
     if data.title is not None:
-        work.title = data.title
-    if data.description is not None:
-        work.description = data.description
-    if data.image_url is not None:
-        work.image_url = data.image_url
-    if data.prompt is not None:
-        work.prompt = data.prompt
-    if data.negative_prompt is not None:
-        work.negative_prompt = data.negative_prompt
-    if data.model is not None:
-        work.model = data.model
-    if data.parameters is not None:
-        work.set_parameters(data.parameters)
+        note.title = data.title
+    if data.content is not None:
+        note.content = data.content
     if data.status is not None:
-        work.status = data.status
+        note.status = data.status
+        # 如果状态改为公开，设置发布时间
+        if data.status == "public" and not note.published_at:
+            note.published_at = datetime.now()
+        # 如果状态改为私密或草稿，清除发布时间
+        elif data.status in ["private", "draft"]:
+            note.published_at = None
     
     # 更新修改时间
-    work.updated_at = datetime.now()
+    note.updated_at = datetime.now()
     
     # 保存更改
-    session.add(work)
+    session.add(note)
     session.commit()
-    session.refresh(work)
+    session.refresh(note)
     
-    # 返回更新后的作品
     return {
         "code": 200,
         "message": "更新成功",
         "data": {
-            "id": str(work.id),
-            "title": work.title,
-            "description": work.description,
-            "imageUrl": work.image_url,
-            "prompt": work.prompt,
-            "negativePrompt": work.negative_prompt,
-            "model": work.model,
-            "parameters": work.get_parameters(),
-            "status": work.status,
-            "createdAt": work.created_at.isoformat() if work.created_at else "",
-            "updatedAt": work.updated_at.isoformat() if work.updated_at else ""
+            "id": str(note.id),
+            "user_id": str(note.user_id),
+            "title": note.title,
+            "content": note.content,
+            "status": note.status,
+            "published_at": note.published_at.isoformat() if note.published_at else None,
+            "created_at": note.created_at.isoformat() if note.created_at else "",
+            "updated_at": note.updated_at.isoformat() if note.updated_at else ""
         }
     }
 
 
-@app.delete("/api/works/{work_id}", response_model=dict)
-def delete_work(
-    work_id: int,
+@app.delete("/api/notes/{note_id}", response_model=dict)
+def delete_note(
+    note_id: int,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
     """
-    删除作品接口
+    删除笔记接口
     
     功能说明：
-    删除指定的作品，只能删除当前用户自己的作品
+    删除指定的笔记，只能删除当前用户自己的笔记
     
     参数：
-    - work_id: 作品ID（路径参数）
+    - note_id: 笔记ID（路径参数）
     - current_user: 当前登录用户
     - session: 数据库会话
     
     返回：
     - 删除成功消息
-    
-    注意：
-    - 删除操作不可恢复，请谨慎操作
     """
-    # 查询作品
-    work = session.get(Work, work_id)
+    note = session.get(Note, note_id)
     
-    # 检查作品是否存在且属于当前用户
-    if not work or work.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="作品不存在")
+    # 检查笔记是否存在且属于当前用户
+    if not note or note.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="笔记不存在")
     
-    # 删除作品
-    session.delete(work)
+    # 删除笔记
+    session.delete(note)
     session.commit()
     
     return {
@@ -868,123 +887,341 @@ def delete_work(
     }
 
 
-# ==================== 消费相关接口 ====================
-
-@app.get("/api/consumption/history", response_model=dict)
-def get_consumption_history(
-    page: int = 1,
-    page_size: int = 10,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+@app.put("/api/notes/{note_id}/publish", response_model=dict)
+def publish_note(
+    note_id: int,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
     """
-    获取消费历史记录接口
+    发布笔记接口（私密→公开）
     
     功能说明：
-    1. 获取当前用户的消费记录
-    2. 支持分页查询
-    3. 支持按日期范围筛选
+    将笔记状态从私密改为公开，并设置发布时间
     
     参数：
-    - page: 页码
-    - page_size: 每页记录数
-    - start_date: 开始日期（可选，ISO格式字符串）
-    - end_date: 结束日期（可选，ISO格式字符串）
+    - note_id: 笔记ID
     - current_user: 当前登录用户
     - session: 数据库会话
     
     返回：
-    - 消费记录列表和分页信息
+    - 更新后的笔记信息
     """
-    # 计算偏移量
+    note = session.get(Note, note_id)
+    
+    if not note or note.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    
+    note.status = "public"
+    note.published_at = datetime.now()
+    note.updated_at = datetime.now()
+    
+    session.add(note)
+    session.commit()
+    session.refresh(note)
+    
+    return {
+        "code": 200,
+        "message": "发布成功",
+        "data": {
+            "id": str(note.id),
+            "user_id": str(note.user_id),
+            "title": note.title,
+            "content": note.content,
+            "status": note.status,
+            "published_at": note.published_at.isoformat() if note.published_at else None,
+            "created_at": note.created_at.isoformat() if note.created_at else "",
+            "updated_at": note.updated_at.isoformat() if note.updated_at else ""
+        }
+    }
+
+
+@app.put("/api/notes/{note_id}/draft", response_model=dict)
+def save_note_as_draft(
+    note_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    存为草稿接口（公开→私密）
+    
+    功能说明：
+    将笔记状态从公开改为私密（草稿），并清除发布时间
+    
+    参数：
+    - note_id: 笔记ID
+    - current_user: 当前登录用户
+    - session: 数据库会话
+    
+    返回：
+    - 更新后的笔记信息
+    """
+    note = session.get(Note, note_id)
+    
+    if not note or note.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    
+    note.status = "draft"
+    note.published_at = None
+    note.updated_at = datetime.now()
+    
+    session.add(note)
+    session.commit()
+    session.refresh(note)
+    
+    return {
+        "code": 200,
+        "message": "已存为草稿",
+        "data": {
+            "id": str(note.id),
+            "user_id": str(note.user_id),
+            "title": note.title,
+            "content": note.content,
+            "status": note.status,
+            "published_at": note.published_at.isoformat() if note.published_at else None,
+            "created_at": note.created_at.isoformat() if note.created_at else "",
+            "updated_at": note.updated_at.isoformat() if note.updated_at else ""
+        }
+    }
+
+
+@app.put("/api/notes/{note_id}/autosave", response_model=dict)
+def autosave_note(
+    note_id: int,
+    data: NoteAutoSave,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    自动保存笔记接口
+    
+    功能说明：
+    只更新笔记内容，不改变状态（用于前端自动保存功能）
+    
+    参数：
+    - note_id: 笔记ID
+    - data: 笔记内容
+    - current_user: 当前登录用户
+    - session: 数据库会话
+    
+    返回：
+    - 更新后的笔记信息
+    """
+    note = session.get(Note, note_id)
+    
+    if not note or note.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    
+    note.content = data.content
+    note.updated_at = datetime.now()
+    
+    session.add(note)
+    session.commit()
+    session.refresh(note)
+    
+    return {
+        "code": 200,
+        "message": "保存成功",
+        "data": {
+            "id": str(note.id),
+            "user_id": str(note.user_id),
+            "title": note.title,
+            "content": note.content,
+            "status": note.status,
+            "published_at": note.published_at.isoformat() if note.published_at else None,
+            "created_at": note.created_at.isoformat() if note.created_at else "",
+            "updated_at": note.updated_at.isoformat() if note.updated_at else ""
+        }
+    }
+
+
+# ==================== 发现广场相关接口 ====================
+
+@app.get("/api/discover", response_model=dict)
+def get_discover_notes(
+    page: int = 1,
+    page_size: int = 20,
+    session: Session = Depends(get_session)
+):
+    """
+    获取发现广场列表接口（公开文章）
+    
+    功能说明：
+    获取所有公开的笔记，按发布时间倒序排列
+    
+    参数：
+    - page: 页码
+    - page_size: 每页记录数
+    - session: 数据库会话
+    
+    返回：
+    - 公开笔记列表和分页信息
+    """
     offset = (page - 1) * page_size
     
-    # 构建基础查询：查询当前用户的所有消费记录
-    statement = select(ConsumptionRecord).where(ConsumptionRecord.user_id == current_user.id)
-    total_statement = select(ConsumptionRecord).where(ConsumptionRecord.user_id == current_user.id)
-    
-    # 日期范围过滤（如果提供了日期参数）
-    if start_date:
-        # 将ISO格式字符串转换为datetime对象
-        # replace('Z', '+00:00'): 处理时区格式
-        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-        # 添加日期条件：创建时间 >= 开始日期
-        statement = statement.where(ConsumptionRecord.created_at >= start_dt)
-        total_statement = total_statement.where(ConsumptionRecord.created_at >= start_dt)
-    
-    if end_date:
-        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-        # 添加日期条件：创建时间 <= 结束日期
-        statement = statement.where(ConsumptionRecord.created_at <= end_dt)
-        total_statement = total_statement.where(ConsumptionRecord.created_at <= end_dt)
+    # 查询所有公开的笔记，按发布时间倒序
+    statement = select(Note).where(Note.status == "public").where(Note.published_at.isnot(None))
+    total_statement = select(Note).where(Note.status == "public").where(Note.published_at.isnot(None))
     
     # 执行分页查询
-    records = session.exec(statement.offset(offset).limit(page_size)).all()
-    # 统计总数（用于分页）
-    total = len(session.exec(total_statement).all())
+    notes = session.exec(
+        statement.order_by(Note.published_at.desc()).offset(offset).limit(page_size)
+    ).all()
+    total_notes = session.exec(total_statement).all()
+    total = len(total_notes)
     
     # 转换为字典格式
-    records_list = []
-    for record in records:
-        records_list.append({
-            "id": str(record.id),
-            "type": record.type,  # 消费类型：image_generation, premium_feature, subscription
-            "amount": record.amount,  # 消费金额
-            "description": record.description,  # 描述
-            "status": record.status,  # 状态：success, failed, refunded
-            "createdAt": record.created_at.isoformat() if record.created_at else ""
+    notes_list = []
+    for note in notes:
+        # 获取作者信息
+        author = session.get(User, note.user_id)
+        
+        # 提取内容预览（前50字符）
+        content_preview = note.content[:50] if note.content else ""
+        content_preview = re.sub(r'<[^>]+>', '', content_preview)
+        
+        notes_list.append({
+            "id": str(note.id),
+            "title": note.title,
+            "content_preview": content_preview,
+            "author": {
+                "id": str(author.id) if author else "",
+                "nickname": author.nickname if author and author.nickname else (author.username if author else ""),
+                "avatar": author.avatar if author else None,
+            },
+            "published_at": note.published_at.isoformat() if note.published_at else "",
+            "created_at": note.created_at.isoformat() if note.created_at else "",
         })
     
     return {
         "code": 200,
         "message": "success",
         "data": {
-            "list": records_list,  # 记录列表
-            "total": total,  # 总记录数
-            "page": page,  # 当前页码
-            "pageSize": page_size  # 每页记录数
+            "list": notes_list,
+            "total": total,
+            "page": page,
+            "page_size": page_size
         }
     }
 
 
-@app.get("/api/consumption/stats", response_model=dict)
-def get_consumption_stats(
-    current_user: User = Depends(get_current_user),
+@app.get("/api/discover/{note_id}", response_model=dict)
+def get_public_note_by_id(
+    note_id: int,
     session: Session = Depends(get_session)
 ):
     """
-    获取消费统计信息接口
+    获取公开笔记详情接口（只读）
     
     功能说明：
-    统计当前用户的总消费金额和总消费次数
+    根据笔记ID获取公开笔记详情，任何人都可以访问
     
     参数：
-    - current_user: 当前登录用户
+    - note_id: 笔记ID
     - session: 数据库会话
     
     返回：
-    - 总消费金额和总消费次数
-    """
-    # 查询当前用户的所有消费记录
-    records = session.exec(
-        select(ConsumptionRecord).where(ConsumptionRecord.user_id == current_user.id)
-    ).all()
+    - 笔记详情
     
-    # 计算总消费金额（只统计成功的记录）
-    # sum(): 求和函数
-    # r.amount for r in records if r.status == "success": 列表推导式，筛选成功的记录并提取金额
-    total_amount = sum(r.amount for r in records if r.status == "success")
-    # 总记录数
-    total_count = len(records)
+    注意：
+    - 只能获取状态为"public"的笔记
+    """
+    note = session.get(Note, note_id)
+    
+    if not note or note.status != "public":
+        raise HTTPException(status_code=404, detail="笔记不存在或未公开")
+    
+    # 获取作者信息
+    author = session.get(User, note.user_id)
     
     return {
         "code": 200,
         "message": "success",
         "data": {
-            "totalAmount": total_amount,  # 总消费金额
-            "totalCount": total_count  # 总消费次数
+            "id": str(note.id),
+            "user_id": str(note.user_id),
+            "title": note.title,
+            "content": note.content,
+            "status": note.status,
+            "published_at": note.published_at.isoformat() if note.published_at else None,
+            "created_at": note.created_at.isoformat() if note.created_at else "",
+            "updated_at": note.updated_at.isoformat() if note.updated_at else "",
+            "author": {
+                "id": str(author.id) if author else "",
+                "nickname": author.nickname if author and author.nickname else (author.username if author else ""),
+                "avatar": author.avatar if author else None,
+            } if author else None
+        }
+    }
+
+
+@app.get("/api/users/{user_id}/notes", response_model=dict)
+def get_user_public_notes(
+    user_id: int,
+    page: int = 1,
+    page_size: int = 20,
+    session: Session = Depends(get_session)
+):
+    """
+    获取用户公开文章列表接口
+    
+    功能说明：
+    获取指定用户的所有公开文章
+    
+    参数：
+    - user_id: 用户ID
+    - page: 页码
+    - page_size: 每页记录数
+    - session: 数据库会话
+    
+    返回：
+    - 公开文章列表和分页信息
+    """
+    offset = (page - 1) * page_size
+    
+    # 查询指定用户的公开笔记
+    statement = select(Note).where(Note.user_id == user_id).where(Note.status == "public")
+    total_statement = select(Note).where(Note.user_id == user_id).where(Note.status == "public")
+    
+    # 执行分页查询
+    notes = session.exec(
+        statement.order_by(Note.published_at.desc()).offset(offset).limit(page_size)
+    ).all()
+    total_notes = session.exec(total_statement).all()
+    total = len(total_notes)
+    
+    # 转换为字典格式
+    notes_list = []
+    for note in notes:
+        # 获取作者信息
+        author = session.get(User, note.user_id)
+        
+        # 提取内容预览
+        content_preview = note.content[:50] if note.content else ""
+        import re
+        content_preview = re.sub(r'<[^>]+>', '', content_preview)
+        
+        notes_list.append({
+            "id": str(note.id),
+            "title": note.title,
+            "content_preview": content_preview,
+            "author": {
+                "id": str(author.id) if author else "",
+                "nickname": author.nickname if author and author.nickname else (author.username if author else ""),
+                "avatar": author.avatar if author else None,
+            },
+            "published_at": note.published_at.isoformat() if note.published_at else "",
+            "created_at": note.created_at.isoformat() if note.created_at else "",
+        })
+    
+    return {
+        "code": 200,
+        "message": "success",
+        "data": {
+            "list": notes_list,
+            "total": total,
+            "page": page,
+            "page_size": page_size
         }
     }
 
