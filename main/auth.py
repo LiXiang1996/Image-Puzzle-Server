@@ -232,3 +232,55 @@ async def get_current_user(
             detail="Invalid authentication credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+async def get_current_user_optional(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
+    session: Session = Depends(get_session)
+) -> Optional[User]:
+    """
+    获取当前登录用户（可选版本）
+    
+    功能说明：
+    与get_current_user类似，但如果用户未登录，返回None而不是抛出异常
+    用于需要区分登录/未登录状态的接口
+    
+    使用方式：
+    def my_api(current_user: Optional[User] = Depends(get_current_user_optional)):
+        if current_user:
+            # 用户已登录
+        else:
+            # 用户未登录
+        pass
+    
+    参数：
+    - credentials: HTTP认证凭证（可选），如果未提供则返回None
+    - session: 数据库会话
+    
+    返回：
+    - User对象（如果已登录）或None（如果未登录）
+    """
+    if credentials is None:
+        return None
+    
+    try:
+        token = credentials.credentials
+        payload = verify_token(token)
+        
+        if payload is None:
+            return None
+        
+        user_id_str = payload.get("sub")
+        if user_id_str is None:
+            return None
+        
+        try:
+            user_id: int = int(user_id_str)
+        except (ValueError, TypeError):
+            return None
+        
+        user = session.get(User, user_id)
+        return user
+    except Exception:
+        # 任何错误都返回None（静默失败）
+        return None

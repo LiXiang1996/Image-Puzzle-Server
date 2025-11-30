@@ -14,6 +14,7 @@ from sqlmodel import SQLModel, Field
 from typing import Optional, Dict, Any
 from datetime import datetime
 import json
+from sqlalchemy import UniqueConstraint
 
 
 class User(SQLModel, table=True):
@@ -77,3 +78,69 @@ class Note(SQLModel, table=True):
     published_at: Optional[datetime] = None  # 发布时间（公开时设置）
     created_at: Optional[datetime] = Field(default_factory=datetime.now)
     updated_at: Optional[datetime] = Field(default_factory=datetime.now)
+
+
+class Like(SQLModel, table=True):
+    """
+    喜爱（点赞）模型
+    
+    字段说明：
+    - id: 主键
+    - user_id: 用户ID，外键关联到user表
+    - note_id: 笔记ID，外键关联到note表
+    - created_at: 点赞时间
+    
+    索引：
+    - (user_id, note_id) 唯一索引，防止重复点赞
+    """
+    __table_args__ = (UniqueConstraint("user_id", "note_id", name="unique_user_note_like"),)
+    
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    note_id: int = Field(foreign_key="note.id", index=True)
+    created_at: Optional[datetime] = Field(default_factory=datetime.now)
+
+
+class Favorite(SQLModel, table=True):
+    """
+    收藏模型
+    
+    字段说明：
+    - id: 主键
+    - user_id: 用户ID，外键关联到user表
+    - note_id: 笔记ID，外键关联到note表
+    - created_at: 收藏时间
+    
+    索引：
+    - (user_id, note_id) 唯一索引，防止重复收藏
+    """
+    __table_args__ = (UniqueConstraint("user_id", "note_id", name="unique_user_note_favorite"),)
+    
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    note_id: int = Field(foreign_key="note.id", index=True)
+    created_at: Optional[datetime] = Field(default_factory=datetime.now)
+
+
+class Comment(SQLModel, table=True):
+    """
+    评论模型
+    
+    字段说明：
+    - id: 主键
+    - user_id: 用户ID，外键关联到user表
+    - note_id: 笔记ID，外键关联到note表
+    - parent_id: 父评论ID（用于回复，如果是顶级评论则为None）
+    - content: 评论内容
+    - created_at: 评论时间
+    
+    索引：
+    - note_id: 索引，用于快速查询某笔记的所有评论
+    - parent_id: 索引，用于快速查询某评论的所有回复
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    note_id: int = Field(foreign_key="note.id", index=True)
+    parent_id: Optional[int] = Field(default=None, foreign_key="comment.id", index=True)  # 父评论ID，用于嵌套回复
+    content: str  # 评论内容
+    created_at: Optional[datetime] = Field(default_factory=datetime.now)

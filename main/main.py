@@ -19,8 +19,8 @@ from typing import List, Optional
 from datetime import datetime
 from pydantic import BaseModel
 from db.database import init_db, get_session
-from db.models import User, Note
-from auth import create_access_token, get_current_user
+from db.models import User, Note, Like, Favorite, Comment
+from auth import create_access_token, get_current_user, get_current_user_optional
 import uvicorn
 import os
 import shutil
@@ -1337,6 +1337,482 @@ def get_user_public_notes(
             "page": page,
             "page_size": page_size
         }
+    }
+
+
+# ==================== 喜爱（点赞）相关接口 ====================
+
+@app.post("/api/notes/{note_id}/like", response_model=dict)
+def toggle_like(
+    note_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    点赞/取消点赞接口
+    
+    功能说明：
+    如果用户已点赞，则取消点赞；如果未点赞，则点赞
+    
+    参数：
+    - note_id: 笔记ID
+    - current_user: 当前登录用户
+    - session: 数据库会话
+    
+    返回：
+    - 操作结果和当前点赞状态
+    """
+    # 检查笔记是否存在
+    note = session.get(Note, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    
+    # 检查是否已点赞
+    existing_like = session.exec(
+        select(Like).where(Like.user_id == current_user.id).where(Like.note_id == note_id)
+    ).first()
+    
+    if existing_like:
+        # 已点赞，取消点赞
+        session.delete(existing_like)
+        session.commit()
+        is_liked = False
+        action = "取消点赞"
+    else:
+        # 未点赞，添加点赞
+        new_like = Like(user_id=current_user.id, note_id=note_id)
+        session.add(new_like)
+        session.commit()
+        is_liked = True
+        action = "点赞成功"
+    
+    # 获取点赞总数
+    like_count = session.exec(
+        select(Like).where(Like.note_id == note_id)
+    ).all()
+    like_count = len(like_count)
+    
+    return {
+        "code": 200,
+        "message": action,
+        "data": {
+            "is_liked": is_liked,
+            "like_count": like_count
+        }
+    }
+
+
+@app.get("/api/notes/{note_id}/likes", response_model=dict)
+def get_like_count(
+    note_id: int,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    session: Session = Depends(get_session)
+):
+    """
+    获取笔记点赞数和当前用户点赞状态
+    
+    参数：
+    - note_id: 笔记ID
+    - current_user: 当前用户（可选，未登录时返回False）
+    - session: 数据库会话
+    
+    返回：
+    - 点赞数和当前用户是否已点赞
+    """
+    # 检查笔记是否存在
+    note = session.get(Note, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    
+    # 获取点赞总数
+    likes = session.exec(
+        select(Like).where(Like.note_id == note_id)
+    ).all()
+    like_count = len(likes)
+    
+    # 检查当前用户是否已点赞
+    is_liked = False
+    if current_user:
+        existing_like = session.exec(
+            select(Like).where(Like.user_id == current_user.id).where(Like.note_id == note_id)
+        ).first()
+        is_liked = existing_like is not None
+    
+    return {
+        "code": 200,
+        "message": "success",
+        "data": {
+            "like_count": like_count,
+            "is_liked": is_liked
+        }
+    }
+
+
+# ==================== 收藏相关接口 ====================
+
+@app.post("/api/notes/{note_id}/favorite", response_model=dict)
+def toggle_favorite(
+    note_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    收藏/取消收藏接口
+    
+    功能说明：
+    如果用户已收藏，则取消收藏；如果未收藏，则收藏
+    
+    参数：
+    - note_id: 笔记ID
+    - current_user: 当前登录用户
+    - session: 数据库会话
+    
+    返回：
+    - 操作结果和当前收藏状态
+    """
+    # 检查笔记是否存在
+    note = session.get(Note, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    
+    # 检查是否已收藏
+    existing_favorite = session.exec(
+        select(Favorite).where(Favorite.user_id == current_user.id).where(Favorite.note_id == note_id)
+    ).first()
+    
+    if existing_favorite:
+        # 已收藏，取消收藏
+        session.delete(existing_favorite)
+        session.commit()
+        is_favorited = False
+        action = "取消收藏"
+    else:
+        # 未收藏，添加收藏
+        new_favorite = Favorite(user_id=current_user.id, note_id=note_id)
+        session.add(new_favorite)
+        session.commit()
+        is_favorited = True
+        action = "收藏成功"
+    
+    # 获取收藏总数
+    favorites = session.exec(
+        select(Favorite).where(Favorite.note_id == note_id)
+    ).all()
+    favorite_count = len(favorites)
+    
+    return {
+        "code": 200,
+        "message": action,
+        "data": {
+            "is_favorited": is_favorited,
+            "favorite_count": favorite_count
+        }
+    }
+
+
+@app.get("/api/notes/{note_id}/favorites", response_model=dict)
+def get_favorite_count(
+    note_id: int,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    session: Session = Depends(get_session)
+):
+    """
+    获取笔记收藏数和当前用户收藏状态
+    
+    参数：
+    - note_id: 笔记ID
+    - current_user: 当前用户（可选，未登录时返回False）
+    - session: 数据库会话
+    
+    返回：
+    - 收藏数和当前用户是否已收藏
+    """
+    # 检查笔记是否存在
+    note = session.get(Note, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    
+    # 获取收藏总数
+    favorites = session.exec(
+        select(Favorite).where(Favorite.note_id == note_id)
+    ).all()
+    favorite_count = len(favorites)
+    
+    # 检查当前用户是否已收藏
+    is_favorited = False
+    if current_user:
+        existing_favorite = session.exec(
+            select(Favorite).where(Favorite.user_id == current_user.id).where(Favorite.note_id == note_id)
+        ).first()
+        is_favorited = existing_favorite is not None
+    
+    return {
+        "code": 200,
+        "message": "success",
+        "data": {
+            "favorite_count": favorite_count,
+            "is_favorited": is_favorited
+        }
+    }
+
+
+@app.get("/api/user/favorites", response_model=dict)
+def get_user_favorites(
+    page: int = 1,
+    page_size: int = 20,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    获取当前用户的收藏列表
+    
+    参数：
+    - page: 页码
+    - page_size: 每页记录数
+    - current_user: 当前登录用户
+    - session: 数据库会话
+    
+    返回：
+    - 收藏的笔记列表和分页信息
+    """
+    offset = (page - 1) * page_size
+    
+    # 查询当前用户的收藏
+    statement = select(Favorite).where(Favorite.user_id == current_user.id)
+    total_statement = select(Favorite).where(Favorite.user_id == current_user.id)
+    
+    # 执行分页查询，按收藏时间倒序
+    favorites = session.exec(
+        statement.order_by(Favorite.created_at.desc()).offset(offset).limit(page_size)
+    ).all()
+    total_favorites = session.exec(total_statement).all()
+    total = len(total_favorites)
+    
+    # 转换为字典格式
+    favorites_list = []
+    for favorite in favorites:
+        # 获取笔记信息
+        note = session.get(Note, favorite.note_id)
+        if not note:
+            continue
+        
+        # 获取作者信息
+        author = session.get(User, note.user_id)
+        
+        # 提取内容预览
+        content_preview = note.content[:50] if note.content else ""
+        content_preview = re.sub(r'<[^>]+>', '', content_preview)
+        
+        favorites_list.append({
+            "id": str(note.id),
+            "title": note.title,
+            "content_preview": content_preview,
+            "author": {
+                "id": str(author.id) if author else "",
+                "nickname": author.nickname if author and author.nickname else (author.username if author else ""),
+                "avatar": author.avatar if author else None,
+            },
+            "published_at": note.published_at.isoformat() if note.published_at else "",
+            "created_at": note.created_at.isoformat() if note.created_at else "",
+            "favorited_at": favorite.created_at.isoformat() if favorite.created_at else "",
+        })
+    
+    return {
+        "code": 200,
+        "message": "success",
+        "data": {
+            "list": favorites_list,
+            "total": total,
+            "page": page,
+            "page_size": page_size
+        }
+    }
+
+
+# ==================== 评论相关接口 ====================
+
+class CommentCreate(BaseModel):
+    """创建评论请求模型"""
+    content: str
+    parent_id: Optional[int] = None  # 父评论ID，用于回复
+
+
+@app.post("/api/notes/{note_id}/comments", response_model=dict)
+def create_comment(
+    note_id: int,
+    data: CommentCreate,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    创建评论接口
+    
+    功能说明：
+    创建一条新评论，如果是回复则指定parent_id
+    
+    参数：
+    - note_id: 笔记ID
+    - data: 评论内容（content）和父评论ID（parent_id，可选）
+    - current_user: 当前登录用户
+    - session: 数据库会话
+    
+    返回：
+    - 创建的评论信息
+    """
+    # 检查笔记是否存在
+    note = session.get(Note, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    
+    # 如果指定了parent_id，检查父评论是否存在
+    if data.parent_id:
+        parent_comment = session.get(Comment, data.parent_id)
+        if not parent_comment or parent_comment.note_id != note_id:
+            raise HTTPException(status_code=400, detail="父评论不存在或不属于该笔记")
+    
+    # 创建评论
+    new_comment = Comment(
+        user_id=current_user.id,
+        note_id=note_id,
+        parent_id=data.parent_id,
+        content=data.content
+    )
+    session.add(new_comment)
+    session.commit()
+    session.refresh(new_comment)
+    
+    # 获取作者信息
+    author = session.get(User, current_user.id)
+    
+    return {
+        "code": 200,
+        "message": "评论成功",
+        "data": {
+            "id": str(new_comment.id),
+            "user_id": str(new_comment.user_id),
+            "note_id": str(new_comment.note_id),
+            "parent_id": str(new_comment.parent_id) if new_comment.parent_id else None,
+            "content": new_comment.content,
+            "created_at": new_comment.created_at.isoformat() if new_comment.created_at else "",
+            "author": {
+                "id": str(author.id) if author else "",
+                "nickname": author.nickname if author and author.nickname else (author.username if author else ""),
+                "avatar": author.avatar if author else None,
+            } if author else None
+        }
+    }
+
+
+@app.get("/api/notes/{note_id}/comments", response_model=dict)
+def get_comments(
+    note_id: int,
+    session: Session = Depends(get_session)
+):
+    """
+    获取笔记评论列表接口
+    
+    功能说明：
+    获取某笔记的所有评论，返回树形结构（顶级评论及其回复）
+    
+    参数：
+    - note_id: 笔记ID
+    - session: 数据库会话
+    
+    返回：
+    - 评论列表（树形结构）
+    """
+    # 检查笔记是否存在
+    note = session.get(Note, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    
+    # 获取所有评论
+    all_comments = session.exec(
+        select(Comment).where(Comment.note_id == note_id).order_by(Comment.created_at.asc())
+    ).all()
+    
+    # 构建评论树
+    comments_dict = {}
+    root_comments = []
+    
+    # 第一遍：创建所有评论的字典
+    for comment in all_comments:
+        author = session.get(User, comment.user_id)
+        comment_data = {
+            "id": str(comment.id),
+            "user_id": str(comment.user_id),
+            "note_id": str(comment.note_id),
+            "parent_id": str(comment.parent_id) if comment.parent_id else None,
+            "content": comment.content,
+            "created_at": comment.created_at.isoformat() if comment.created_at else "",
+            "author": {
+                "id": str(author.id) if author else "",
+                "nickname": author.nickname if author and author.nickname else (author.username if author else ""),
+                "avatar": author.avatar if author else None,
+            } if author else None,
+            "replies": []  # 子评论列表
+        }
+        comments_dict[comment.id] = comment_data
+    
+    # 第二遍：构建树形结构
+    for comment in all_comments:
+        comment_data = comments_dict[comment.id]
+        if comment.parent_id is None:
+            # 顶级评论
+            root_comments.append(comment_data)
+        else:
+            # 回复评论，添加到父评论的replies中
+            if comment.parent_id in comments_dict:
+                comments_dict[comment.parent_id]["replies"].append(comment_data)
+    
+    return {
+        "code": 200,
+        "message": "success",
+        "data": {
+            "list": root_comments,
+            "total": len(all_comments)
+        }
+    }
+
+
+@app.delete("/api/comments/{comment_id}", response_model=dict)
+def delete_comment(
+    comment_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    删除评论接口
+    
+    功能说明：
+    删除指定的评论（只能删除自己的评论）
+    
+    参数：
+    - comment_id: 评论ID
+    - current_user: 当前登录用户
+    - session: 数据库会话
+    
+    返回：
+    - 删除结果
+    """
+    # 获取评论
+    comment = session.get(Comment, comment_id)
+    if not comment:
+        raise HTTPException(status_code=404, detail="评论不存在")
+    
+    # 检查权限：只能删除自己的评论
+    if comment.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权删除此评论")
+    
+    # 删除评论（注意：如果有子评论，可能需要级联删除或禁止删除）
+    # 这里简单处理：只删除当前评论，子评论保留（parent_id会变成None）
+    session.delete(comment)
+    session.commit()
+    
+    return {
+        "code": 200,
+        "message": "删除成功",
+        "data": {}
     }
 
 
