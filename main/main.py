@@ -1194,6 +1194,11 @@ def get_discover_notes(
         content_preview = note.content[:50] if note.content else ""
         content_preview = re.sub(r'<[^>]+>', '', content_preview)
         
+        # 获取统计数据（喜爱数、收藏数、评论数）
+        like_count = len(session.exec(select(Like).where(Like.note_id == note.id)).all())
+        favorite_count = len(session.exec(select(Favorite).where(Favorite.note_id == note.id)).all())
+        comment_count = len(session.exec(select(Comment).where(Comment.note_id == note.id)).all())
+        
         notes_list.append({
             "id": str(note.id),
             "title": note.title,
@@ -1205,6 +1210,9 @@ def get_discover_notes(
             },
             "published_at": note.published_at.isoformat() if note.published_at else "",
             "created_at": note.created_at.isoformat() if note.created_at else "",
+            "like_count": like_count,
+            "favorite_count": favorite_count,
+            "comment_count": comment_count,
         })
     
     return {
