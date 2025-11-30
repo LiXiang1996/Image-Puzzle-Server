@@ -679,6 +679,126 @@ async def upload_avatar(
     except HTTPException:
         raise
     except Exception as e:
+        print(f"上传头像失败: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+
+
+@app.post("/api/notes/upload-image", response_model=dict)
+async def upload_note_image(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    上传笔记内容中的图片接口
+    
+    功能说明：
+    上传笔记内容中的图片，保存到云存储或本地文件系统并返回图片URL
+    注意：此接口不会更新用户头像，仅用于笔记内容中的图片
+    
+    参数：
+    - file: 上传的图片文件
+    - current_user: 当前登录用户
+    - session: 数据库会话
+    
+    返回：
+    - 图片URL
+    
+    注意：
+    - 只支持图片格式（jpg, jpeg, png, gif）
+    - 文件大小限制为5MB
+    - 优先使用 Cloudinary 云存储（生产环境）
+    - 如果没有配置 Cloudinary，则使用本地文件系统（仅限本地开发环境）
+    """
+    try:
+        # 检查文件类型
+        allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/gif"]
+        if file.content_type not in allowed_types:
+            raise HTTPException(status_code=400, detail="只支持图片格式：jpg, jpeg, png, gif")
+        
+        # 检查文件大小（5MB限制）
+        file_content = await file.read()
+        if len(file_content) > 5 * 1024 * 1024:  # 5MB
+            raise HTTPException(status_code=400, detail="文件大小不能超过5MB")
+        
+        # 生成文件名（使用用户ID和时间戳）
+        file_extension = file.filename.split(".")[-1] if "." in file.filename else "jpg"
+        filename = f"note_{current_user.id}_{int(datetime.now().timestamp())}.{file_extension}"
+        
+        # 检查是否配置了 Cloudinary（优先使用云存储）
+        cloudinary_cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME")
+        cloudinary_api_key = os.getenv("CLOUDINARY_API_KEY")
+        cloudinary_api_secret = os.getenv("CLOUDINARY_API_SECRET")
+        
+        if cloudinary_cloud_name and cloudinary_api_key and cloudinary_api_secret:
+            # ========== 使用 Cloudinary 云存储 ==========
+            try:
+                # 上传到 Cloudinary
+                # folder: 指定文件夹路径，便于管理（使用 notes 文件夹）
+                upload_result = cloudinary.uploader.upload(
+                    file_content,
+                    folder="notes",  # 存储在 notes 文件夹下
+                    public_id=f"note_{current_user.id}_{int(datetime.now().timestamp())}",  # 唯一标识
+                    resource_type="image",
+                    overwrite=False,  # 不覆盖，允许同名文件
+                )
+                
+                # Cloudinary 返回的 URL 是完整的 HTTPS URL
+                image_url = upload_result.get("secure_url") or upload_result.get("url")
+                
+                print(f"✅ 笔记图片已上传到 Cloudinary: {image_url}")
+                
+            except Exception as cloudinary_error:
+                print(f"❌ Cloudinary 上传失败: {type(cloudinary_error).__name__}: {str(cloudinary_error)}")
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"云存储上传失败: {str(cloudinary_error)}"
+                )
+        
+        elif os.getenv("VERCEL"):
+            # ========== Vercel 环境但没有配置 Cloudinary ==========
+            raise HTTPException(
+                status_code=503,
+                detail="Vercel 环境需要配置 Cloudinary 云存储。请在 Vercel 项目设置中添加 CLOUDINARY_CLOUD_NAME、CLOUDINARY_API_KEY、CLOUDINARY_API_SECRET 环境变量"
+            )
+        
+        else:
+            # ========== 本地开发环境：使用本地文件系统 ==========
+            # 创建上传目录
+            upload_dir = Path("uploads/notes")
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            
+            file_path = upload_dir / filename
+            
+            # 保存文件
+            with open(file_path, "wb") as buffer:
+                buffer.write(file_content)
+            
+            # 生成访问URL（相对路径，前端需要配置静态文件服务）
+            image_url = f"/uploads/notes/{filename}"
+            
+            print(f"✅ 笔记图片已保存到本地: {image_url}")
+        
+        # 注意：这里不更新用户头像，只返回图片URL
+        return {
+            "code": 200,
+            "message": "上传成功",
+            "data": {
+                "url": image_url,
+                "image": image_url  # 兼容性字段
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"上传笔记图片失败: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
         print(f"上传头像错误: {type(e).__name__}: {str(e)}")
         import traceback
         traceback.print_exc()
