@@ -19,7 +19,7 @@ from typing import List, Optional
 from datetime import datetime
 from pydantic import BaseModel
 from db.database import init_db, get_session
-from db.models import User, Note, Like, Favorite, Comment
+from db.models import User, Note, Like, Favorite, Comment, MemoryMoment, MemoryMomentLike
 from auth import create_access_token, get_current_user, get_current_user_optional
 import uvicorn
 import os
@@ -212,6 +212,8 @@ else:
 if not os.getenv("VERCEL"):
     # 本地开发环境：创建uploads目录并挂载静态文件服务
     os.makedirs("uploads/avatars", exist_ok=True)
+    os.makedirs("uploads/notes", exist_ok=True)
+    os.makedirs("uploads/memories", exist_ok=True)
     app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
     print("✅ 静态文件服务已启用（本地开发环境）")
 else:
@@ -799,10 +801,6 @@ async def upload_note_image(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
-        print(f"上传头像错误: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
 
 
 @app.post("/api/auth/logout", response_model=dict)
@@ -1941,6 +1939,326 @@ def delete_comment(
         "code": 200,
         "message": "删除成功",
         "data": {}
+    }
+
+
+# ==================== 回忆瞬间相关接口 ====================
+
+class MemoryMomentCreate(BaseModel):
+    """创建回忆瞬间请求模型"""
+    image_url: str  # 图片URL（从临时上传接口获取）
+    description: Optional[str] = None  # 描述，最多50字
+
+
+@app.post("/api/memories/upload-image", response_model=dict)
+async def upload_memory_image(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    上传回忆瞬间图片（临时存储）
+    
+    功能说明：
+    上传回忆瞬间的图片，返回图片URL
+    注意：此接口只上传图片，不保存到数据库，只有发布时才保存
+    
+    参数：
+    - file: 上传的图片文件
+    - current_user: 当前登录用户
+    - session: 数据库会话
+    
+    返回：
+    - 图片URL（临时，如果用户不发布，需要前端清理）
+    
+    注意：
+    - 只支持图片格式（jpg, jpeg, png, gif）
+    - 文件大小限制为5MB（前端需要压缩）
+    """
+    try:
+        # 检查文件类型
+        allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/gif"]
+        if file.content_type not in allowed_types:
+            raise HTTPException(status_code=400, detail="只支持图片格式：jpg, jpeg, png, gif")
+        
+        # 检查文件大小（5MB限制）
+        file_content = await file.read()
+        if len(file_content) > 5 * 1024 * 1024:  # 5MB
+            raise HTTPException(status_code=400, detail="文件大小不能超过5MB")
+        
+        # 生成文件名（使用用户ID和时间戳）
+        file_extension = file.filename.split(".")[-1] if "." in file.filename else "jpg"
+        filename = f"memory_{current_user.id}_{int(datetime.now().timestamp())}.{file_extension}"
+        
+        # 检查是否配置了 Cloudinary（优先使用云存储）
+        cloudinary_cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME")
+        cloudinary_api_key = os.getenv("CLOUDINARY_API_KEY")
+        cloudinary_api_secret = os.getenv("CLOUDINARY_API_SECRET")
+        
+        if cloudinary_cloud_name and cloudinary_api_key and cloudinary_api_secret:
+            # ========== 使用 Cloudinary 云存储 ==========
+            try:
+                # 上传到 Cloudinary
+                upload_result = cloudinary.uploader.upload(
+                    file_content,
+                    folder="memories",  # 存储在 memories 文件夹下
+                    public_id=f"memory_{current_user.id}_{int(datetime.now().timestamp())}",
+                    resource_type="image",
+                    overwrite=False,
+                )
+                
+                image_url = upload_result.get("secure_url") or upload_result.get("url")
+                print(f"✅ 回忆瞬间图片已上传到 Cloudinary: {image_url}")
+                
+            except Exception as cloudinary_error:
+                print(f"❌ Cloudinary 上传失败: {type(cloudinary_error).__name__}: {str(cloudinary_error)}")
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"云存储上传失败: {str(cloudinary_error)}"
+                )
+        
+        elif os.getenv("VERCEL"):
+            raise HTTPException(
+                status_code=503,
+                detail="Vercel 环境需要配置 Cloudinary 云存储"
+            )
+        
+        else:
+            # ========== 本地开发环境：使用本地文件系统 ==========
+            upload_dir = Path("uploads/memories")
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            
+            file_path = upload_dir / filename
+            with open(file_path, "wb") as buffer:
+                buffer.write(file_content)
+            
+            image_url = f"/uploads/memories/{filename}"
+            print(f"✅ 回忆瞬间图片已保存到本地: {image_url}")
+        
+        # 注意：这里不保存到数据库，只返回图片URL
+        return {
+            "code": 200,
+            "message": "上传成功",
+            "data": {
+                "url": image_url,
+                "image": image_url
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"上传回忆瞬间图片失败: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+
+
+@app.post("/api/memories", response_model=dict)
+def create_memory_moment(
+    data: MemoryMomentCreate,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    发布回忆瞬间接口
+    
+    功能说明：
+    发布回忆瞬间，保存到数据库
+    
+    参数：
+    - data: 回忆瞬间数据（图片URL和描述）
+    - current_user: 当前登录用户
+    - session: 数据库会话
+    
+    返回：
+    - 创建的回忆瞬间信息
+    """
+    # 验证描述长度（50字以内）
+    if data.description and len(data.description) > 50:
+        raise HTTPException(status_code=400, detail="描述不能超过50字")
+    
+    # 创建回忆瞬间
+    memory_moment = MemoryMoment(
+        user_id=current_user.id,
+        image_url=data.image_url,
+        description=data.description
+    )
+    session.add(memory_moment)
+    session.commit()
+    session.refresh(memory_moment)
+    
+    # 获取作者信息
+    author = session.get(User, current_user.id)
+    
+    return {
+        "code": 200,
+        "message": "发布成功",
+        "data": {
+            "id": str(memory_moment.id),
+            "user_id": str(memory_moment.user_id),
+            "image_url": memory_moment.image_url,
+            "description": memory_moment.description,
+            "created_at": memory_moment.created_at.isoformat() if memory_moment.created_at else "",
+            "author": {
+                "id": str(author.id) if author else "",
+                "nickname": author.nickname if author and author.nickname else (author.username if author else ""),
+                "avatar": author.avatar if author else None,
+            } if author else None,
+            "like_count": 0,
+            "is_liked": False
+        }
+    }
+
+
+@app.get("/api/memories", response_model=dict)
+def get_memory_moments(
+    page: int = 1,
+    page_size: int = 20,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    session: Session = Depends(get_session)
+):
+    """
+    获取回忆瞬间列表接口
+    
+    功能说明：
+    获取所有回忆瞬间，按发布时间倒序排列
+    
+    参数：
+    - page: 页码
+    - page_size: 每页记录数
+    - current_user: 当前用户（可选，用于判断是否已点赞）
+    - session: 数据库会话
+    
+    返回：
+    - 回忆瞬间列表和分页信息
+    """
+    offset = (page - 1) * page_size
+    
+    # 查询所有回忆瞬间，按创建时间倒序
+    statement = select(MemoryMoment)
+    total_statement = select(MemoryMoment)
+    
+    # 执行分页查询
+    memories = session.exec(
+        statement.order_by(MemoryMoment.created_at.desc()).offset(offset).limit(page_size)
+    ).all()
+    total_memories = session.exec(total_statement).all()
+    total = len(total_memories)
+    
+    # 转换为字典格式
+    memories_list = []
+    for memory in memories:
+        # 获取作者信息
+        author = session.get(User, memory.user_id)
+        
+        # 获取点赞数
+        likes = session.exec(
+            select(MemoryMomentLike).where(MemoryMomentLike.memory_moment_id == memory.id)
+        ).all()
+        like_count = len(likes)
+        
+        # 检查当前用户是否已点赞
+        is_liked = False
+        if current_user:
+            existing_like = session.exec(
+                select(MemoryMomentLike).where(
+                    MemoryMomentLike.user_id == current_user.id
+                ).where(
+                    MemoryMomentLike.memory_moment_id == memory.id
+                )
+            ).first()
+            is_liked = existing_like is not None
+        
+        memories_list.append({
+            "id": str(memory.id),
+            "user_id": str(memory.user_id),
+            "image_url": memory.image_url,
+            "description": memory.description,
+            "created_at": memory.created_at.isoformat() if memory.created_at else "",
+            "author": {
+                "id": str(author.id) if author else "",
+                "nickname": author.nickname if author and author.nickname else (author.username if author else ""),
+                "avatar": author.avatar if author else None,
+            } if author else None,
+            "like_count": like_count,
+            "is_liked": is_liked
+        })
+    
+    return {
+        "code": 200,
+        "message": "success",
+        "data": {
+            "list": memories_list,
+            "total": total,
+            "page": page,
+            "page_size": page_size
+        }
+    }
+
+
+@app.post("/api/memories/{memory_id}/like", response_model=dict)
+def toggle_memory_like(
+    memory_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    点赞/取消点赞回忆瞬间接口
+    
+    功能说明：
+    如果用户已点赞，则取消点赞；如果未点赞，则点赞
+    
+    参数：
+    - memory_id: 回忆瞬间ID
+    - current_user: 当前登录用户
+    - session: 数据库会话
+    
+    返回：
+    - 操作结果和当前点赞状态
+    """
+    # 检查回忆瞬间是否存在
+    memory = session.get(MemoryMoment, memory_id)
+    if not memory:
+        raise HTTPException(status_code=404, detail="回忆瞬间不存在")
+    
+    # 检查是否已点赞
+    existing_like = session.exec(
+        select(MemoryMomentLike).where(
+            MemoryMomentLike.user_id == current_user.id
+        ).where(
+            MemoryMomentLike.memory_moment_id == memory_id
+        )
+    ).first()
+    
+    if existing_like:
+        # 已点赞，取消点赞
+        session.delete(existing_like)
+        session.commit()
+        is_liked = False
+        action = "取消点赞"
+    else:
+        # 未点赞，添加点赞
+        new_like = MemoryMomentLike(user_id=current_user.id, memory_moment_id=memory_id)
+        session.add(new_like)
+        session.commit()
+        is_liked = True
+        action = "点赞成功"
+    
+    # 获取点赞总数
+    likes = session.exec(
+        select(MemoryMomentLike).where(MemoryMomentLike.memory_moment_id == memory_id)
+    ).all()
+    like_count = len(likes)
+    
+    return {
+        "code": 200,
+        "message": action,
+        "data": {
+            "is_liked": is_liked,
+            "like_count": like_count
+        }
     }
 
 

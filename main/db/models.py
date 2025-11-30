@@ -144,3 +144,46 @@ class Comment(SQLModel, table=True):
     parent_id: Optional[int] = Field(default=None, foreign_key="comment.id", index=True)  # 父评论ID，用于嵌套回复
     content: str  # 评论内容
     created_at: Optional[datetime] = Field(default_factory=datetime.now)
+
+
+class MemoryMoment(SQLModel, table=True):
+    """
+    回忆瞬间模型
+    
+    字段说明：
+    - id: 主键
+    - user_id: 用户ID，外键关联到user表
+    - image_url: 图片URL
+    - description: 描述（50字以内）
+    - created_at: 发布时间
+    
+    索引：
+    - user_id: 索引，用于快速查询某用户的回忆瞬间
+    - created_at: 用于按时间排序
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    image_url: str  # 图片URL
+    description: Optional[str] = Field(default=None, max_length=50)  # 描述，最多50字
+    created_at: Optional[datetime] = Field(default_factory=datetime.now, index=True)
+
+
+class MemoryMomentLike(SQLModel, table=True):
+    """
+    回忆瞬间点赞模型
+    
+    字段说明：
+    - id: 主键
+    - user_id: 用户ID，外键关联到user表
+    - memory_moment_id: 回忆瞬间ID，外键关联到memory_moment表
+    - created_at: 点赞时间
+    
+    索引：
+    - (user_id, memory_moment_id) 唯一索引，防止重复点赞
+    """
+    __table_args__ = (UniqueConstraint("user_id", "memory_moment_id", name="unique_user_memory_like"),)
+    
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    memory_moment_id: int = Field(foreign_key="memory_moment.id", index=True)
+    created_at: Optional[datetime] = Field(default_factory=datetime.now)
