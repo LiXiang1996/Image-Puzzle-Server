@@ -1273,6 +1273,7 @@ def autosave_note(
 def get_discover_notes(
     page: int = 1,
     page_size: int = 20,
+    search: Optional[str] = None,
     session: Session = Depends(get_session)
 ):
     """
@@ -1280,10 +1281,12 @@ def get_discover_notes(
     
     功能说明：
     获取所有公开的笔记，按发布时间倒序排列
+    支持按标题搜索
     
     参数：
     - page: 页码
     - page_size: 每页记录数
+    - search: 搜索关键词（标题模糊搜索）
     - session: 数据库会话
     
     返回：
@@ -1294,6 +1297,12 @@ def get_discover_notes(
     # 查询所有公开的笔记，按发布时间倒序
     statement = select(Note).where(Note.status == "public").where(Note.published_at.isnot(None))
     total_statement = select(Note).where(Note.status == "public").where(Note.published_at.isnot(None))
+    
+    # 标题搜索（模糊匹配）
+    if search and search.strip():
+        search_term = f"%{search.strip()}%"
+        statement = statement.where(Note.title.like(search_term))
+        total_statement = total_statement.where(Note.title.like(search_term))
     
     # 执行分页查询
     notes = session.exec(
