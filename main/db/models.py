@@ -175,15 +175,15 @@ class MemoryMomentLike(SQLModel, table=True):
     字段说明：
     - id: 主键
     - user_id: 用户ID，外键关联到user表
-    - memory_moment_id: 回忆瞬间ID，外键关联到memory_moment表
+    - memory_id: 回忆瞬间ID，外键关联到memorymoment表
     - created_at: 点赞时间
     
     索引：
-    - (user_id, memory_moment_id) 唯一索引，防止重复点赞
+    - (user_id, memory_id) 唯一索引，防止重复点赞
     """
-    __table_args__ = (UniqueConstraint("user_id", "memory_moment_id", name="unique_user_memory_like"),)
+    __table_args__ = (UniqueConstraint("user_id", "memory_id", name="unique_user_memory_like"),)
     
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
-    memory_moment_id: int = Field(foreign_key="memory_moment.id", index=True)
+    memory_id: int = Field(foreign_key="memorymoment.id", index=True)
     created_at: Optional[datetime] = Field(default_factory=datetime.now)

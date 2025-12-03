@@ -2155,7 +2155,7 @@ def get_memory_moments(
         
         # 获取点赞数
         likes = session.exec(
-            select(MemoryMomentLike).where(MemoryMomentLike.memory_moment_id == memory.id)
+            select(MemoryMomentLike).where(MemoryMomentLike.memory_id == memory.id)
         ).all()
         like_count = len(likes)
         
@@ -2166,7 +2166,7 @@ def get_memory_moments(
                 select(MemoryMomentLike).where(
                     MemoryMomentLike.user_id == current_user.id
                 ).where(
-                    MemoryMomentLike.memory_moment_id == memory.id
+                    MemoryMomentLike.memory_id == memory.id
                 )
             ).first()
             is_liked = existing_like is not None
@@ -2228,7 +2228,7 @@ def toggle_memory_like(
         select(MemoryMomentLike).where(
             MemoryMomentLike.user_id == current_user.id
         ).where(
-            MemoryMomentLike.memory_moment_id == memory_id
+            MemoryMomentLike.memory_id == memory_id
         )
     ).first()
     
@@ -2240,7 +2240,7 @@ def toggle_memory_like(
         action = "取消点赞"
     else:
         # 未点赞，添加点赞
-        new_like = MemoryMomentLike(user_id=current_user.id, memory_moment_id=memory_id)
+        new_like = MemoryMomentLike(user_id=current_user.id, memory_id=memory_id)
         session.add(new_like)
         session.commit()
         is_liked = True
@@ -2248,7 +2248,7 @@ def toggle_memory_like(
     
     # 获取点赞总数
     likes = session.exec(
-        select(MemoryMomentLike).where(MemoryMomentLike.memory_moment_id == memory_id)
+        select(MemoryMomentLike).where(MemoryMomentLike.memory_id == memory_id)
     ).all()
     like_count = len(likes)
     
