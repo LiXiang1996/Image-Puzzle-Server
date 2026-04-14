@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
 from typing import List, Optional
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from db.database import init_db, get_session
 from db.models import User, Note, Like, Favorite, Comment, MemoryMoment, MemoryMomentLike
 from auth import create_access_token, get_current_user, get_current_user_optional
@@ -25,7 +25,9 @@ import uvicorn
 import os
 import shutil
 import re
+import json
 from pathlib import Path
+from urllib import error, request
 import cloudinary
 import cloudinary.uploader
 
@@ -281,6 +283,125 @@ class UserUpdateRequest(BaseModel):
     bio: Optional[str] = None  # 个人简介（可选）
     location: Optional[str] = None  # 所在地（可选）
     website: Optional[str] = None  # 个人网站（可选）
+
+
+class AIChatHistoryItem(BaseModel):
+    """AI 对话历史消息"""
+    role: str = Field(..., pattern="^(user|assistant)$")
+    content: str
+
+
+class AIEditorChatRequest(BaseModel):
+    """AI 编辑器对话请求"""
+    title: str
+    content: str
+    user_prompt: str
+    history: List[AIChatHistoryItem] = Field(default_factory=list)
+
+
+MINIMAX_API_URL = os.getenv("MINIMAX_API_URL", "https://api.minimaxi.com/v1/text/chatcompletion_v2")
+MINIMAX_MODEL = os.getenv("MINIMAX_MODEL", "MiniMax-M2.5")
+MINIMAX_MAX_HISTORY = int(os.getenv("MINIMAX_MAX_HISTORY", "10"))
+MINIMAX_TIMEOUT_SECONDS = int(os.getenv("MINIMAX_TIMEOUT_SECONDS", "30"))
+EDITOR_CONTENT_CHAR_LIMIT = int(os.getenv("EDITOR_CONTENT_CHAR_LIMIT", "12000"))
+
+
+def build_editor_system_prompt() -> str:
+    """构建编辑器助手 system prompt。"""
+    return (
+        "你是“家书”写作助手，负责帮助用户润色、续写、改写、总结和提炼文章。"
+        "你必须严格基于用户当前文章上下文和提问回答。"
+        "回答使用简体中文，语气自然、克制、实用。"
+        "不要虚构文章中不存在的事实。"
+        "如果用户要求直接改写或续写，请优先给出可直接粘贴使用的内容。"
+        "如果用户问题不明确，请先做最合理的简洁假设并继续帮助。"
+    )
+
+
+def strip_html_preview(html: str) -> str:
+    """生成适合放入 prompt 的正文预览，避免原始 HTML 过长。"""
+    text = re.sub(r"<[^>]+>", " ", html or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > EDITOR_CONTENT_CHAR_LIMIT:
+        return text[:EDITOR_CONTENT_CHAR_LIMIT] + "\n...[正文过长，已截断]"
+    return text
+
+
+def build_editor_messages(payload: AIEditorChatRequest) -> List[dict]:
+    """将前端请求转换为 MiniMax messages。"""
+    article_context = (
+        f"文章标题：{payload.title or '未命名'}\n"
+        f"正文内容（从 HTML 提取的文本预览）：\n{strip_html_preview(payload.content)}\n\n"
+        f"用户当前要求：{payload.user_prompt}"
+    )
+
+    messages = [{"role": "system", "content": build_editor_system_prompt()}]
+
+    if payload.history:
+        recent_history = payload.history[-MINIMAX_MAX_HISTORY:]
+        messages.extend(
+            {"role": item.role, "content": item.content}
+            for item in recent_history
+            if item.content and item.content.strip()
+        )
+
+    messages.append({"role": "user", "content": article_context})
+    return messages
+
+
+def call_minimax_editor_chat(payload: AIEditorChatRequest) -> str:
+    """调用 MiniMax 文本接口并返回回复内容。"""
+    minimax_api_key = os.getenv("MINIMAX_API_KEY")
+    if not minimax_api_key:
+        raise HTTPException(status_code=500, detail="未配置 MINIMAX_API_KEY")
+
+    body = json.dumps(
+        {
+            "model": MINIMAX_MODEL,
+            "messages": build_editor_messages(payload),
+            "temperature": 0.7,
+            "top_p": 0.95,
+        }
+    ).encode("utf-8")
+
+    req = request.Request(
+        MINIMAX_API_URL,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {minimax_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with request.urlopen(req, timeout=MINIMAX_TIMEOUT_SECONDS) as resp:
+            response_data = json.loads(resp.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="ignore")
+        print(f"MiniMax HTTP错误: status={exc.code}, body={error_body}")
+        raise HTTPException(status_code=502, detail="MiniMax 服务调用失败")
+    except error.URLError as exc:
+        print(f"MiniMax 网络错误: {str(exc)}")
+        raise HTTPException(status_code=502, detail="MiniMax 服务暂时不可用")
+    except Exception as exc:
+        print(f"MiniMax 未知错误: {type(exc).__name__}: {str(exc)}")
+        raise HTTPException(status_code=500, detail="AI 助手调用失败")
+
+    if response_data.get("base_resp", {}).get("status_code") not in (None, 0):
+        print(f"MiniMax 业务错误: {response_data}")
+        raise HTTPException(status_code=502, detail="MiniMax 返回异常")
+
+    try:
+        reply = response_data["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, AttributeError, TypeError):
+        print(f"MiniMax 响应解析失败: {response_data}")
+        raise HTTPException(status_code=502, detail="MiniMax 响应格式异常")
+
+    if not reply:
+        raise HTTPException(status_code=502, detail="MiniMax 未返回有效内容")
+
+    return reply
 
 
 # ==================== 认证相关接口 ====================
@@ -2269,6 +2390,30 @@ def toggle_memory_like(
             "like_count": like_count
         }
     }
+
+
+@app.post("/ai/editor-chat", response_model=dict)
+@app.post("/api/ai/editor-chat", response_model=dict)
+def editor_chat(
+    data: AIEditorChatRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    编辑器 AI 助手接口
+
+    功能说明：
+    1. 接收标题、正文 HTML、用户提问和历史消息
+    2. 在后端拼装 system prompt 和文章上下文
+    3. 代理调用 MiniMax 文本模型
+    4. 仅返回 reply 给前端
+    """
+    print(
+        f"🤖 AI编辑器请求: user_id={current_user.id}, "
+        f"title={data.title[:30]}, history_count={len(data.history)}"
+    )
+
+    reply = call_minimax_editor_chat(data)
+    return {"reply": reply}
 
 
 # ==================== 启动配置 ====================

@@ -1,4 +1,4 @@
-# 图片积木后端API
+# 家书后端API
 
 ## 项目说明
 这是图片积木项目的后端服务，使用 FastAPI 框架开发。
@@ -46,6 +46,37 @@ uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 - `GET /api/consumption/history` - 获取消费历史
 - `GET /api/consumption/stats` - 获取消费统计
 
+### AI 助手
+- `POST /api/ai/editor-chat` - 编辑器 AI 对话（需登录）
+
+请求体示例：
+```json
+{
+  "title": "笔记标题",
+  "content": "<p>当前正文 HTML</p>",
+  "user_prompt": "帮我把这一段写得更温柔一些",
+  "history": [
+    { "role": "user", "content": "先帮我总结一下这一段" },
+    { "role": "assistant", "content": "这段主要在表达思念和愧疚。" }
+  ]
+}
+```
+
+响应示例：
+```json
+{
+  "reply": "可以改成更柔和的表达，例如……"
+}
+```
+
+MiniMax 环境变量：
+- `MINIMAX_API_KEY`：MiniMax API Key，必填
+- `MINIMAX_API_URL`：MiniMax 文本接口地址，可选，默认 `https://api.minimaxi.com/v1/text/chatcompletion_v2`
+- `MINIMAX_MODEL`：模型名称，可选，默认 `MiniMax-M2.5`
+- `MINIMAX_MAX_HISTORY`：传给模型的历史消息条数，可选，默认 `10`
+- `MINIMAX_TIMEOUT_SECONDS`：接口超时秒数，可选，默认 `30`
+- `EDITOR_CONTENT_CHAR_LIMIT`：正文提取文本长度上限，可选，默认 `12000`
+
 ## 数据库
 使用 SQLite 数据库，数据文件为 `test.db`
 
@@ -53,4 +84,3 @@ uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 1. 生产环境请修改 `auth.py` 中的 `SECRET_KEY`
 2. 密码目前是明文存储，生产环境请使用密码加密（如 bcrypt）
 3. CORS 已配置允许 `http://localhost:3000` 访问
-
